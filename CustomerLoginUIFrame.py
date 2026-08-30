@@ -34,6 +34,10 @@ class CustomerLoginUIFrame(ttk.Frame):
         self.name_var = tk.StringVar()
         self.name_entry = ttk.Entry(form_frame, textvariable=self.name_var)
         
+        self.id_number_lbl = ttk.Label(form_frame, text="ID Number (9 digits):")
+        self.id_number_var = tk.StringVar()
+        self.id_number_entry = ttk.Entry(form_frame, textvariable=self.id_number_var)
+
         self.phone_lbl = ttk.Label(form_frame, text="Phone Number:")
         self.phone_var = tk.StringVar()
         self.phone_entry = ttk.Entry(form_frame, textvariable=self.phone_var)
@@ -59,17 +63,21 @@ class CustomerLoginUIFrame(ttk.Frame):
             self.confirm_entry.grid(row=3, column=1, padx=5, pady=5)
             self.name_lbl.grid(row=4, column=0, padx=5, pady=5, sticky=tk.E)
             self.name_entry.grid(row=4, column=1, padx=5, pady=5)
-            self.phone_lbl.grid(row=5, column=0, padx=5, pady=5, sticky=tk.E)
-            self.phone_entry.grid(row=5, column=1, padx=5, pady=5)
-            self.dob_lbl.grid(row=6, column=0, padx=5, pady=5, sticky=tk.E)
-            self.dob_frame.grid(row=6, column=1, padx=5, pady=5, sticky=tk.W)
-            self.address_lbl.grid(row=7, column=0, padx=5, pady=5, sticky=tk.E)
-            self.address_entry.grid(row=7, column=1, padx=5, pady=5)
+            self.id_number_lbl.grid(row=5, column=0, padx=5, pady=5, sticky=tk.E)
+            self.id_number_entry.grid(row=5, column=1, padx=5, pady=5)
+            self.phone_lbl.grid(row=6, column=0, padx=5, pady=5, sticky=tk.E)
+            self.phone_entry.grid(row=6, column=1, padx=5, pady=5)
+            self.dob_lbl.grid(row=7, column=0, padx=5, pady=5, sticky=tk.E)
+            self.dob_frame.grid(row=7, column=1, padx=5, pady=5, sticky=tk.W)
+            self.address_lbl.grid(row=8, column=0, padx=5, pady=5, sticky=tk.E)
+            self.address_entry.grid(row=8, column=1, padx=5, pady=5)
         else:
             self.confirm_lbl.grid_forget()
             self.confirm_entry.grid_forget()
             self.name_lbl.grid_forget()
             self.name_entry.grid_forget()
+            self.id_number_lbl.grid_forget()
+            self.id_number_entry.grid_forget()
             self.phone_lbl.grid_forget()
             self.phone_entry.grid_forget()
             self.dob_lbl.grid_forget()
@@ -101,6 +109,7 @@ class CustomerLoginUIFrame(ttk.Frame):
         if self.is_new_var.get():
             confirm_pwd = self.confirm_var.get().strip()
             name = self.name_var.get().strip()
+            id_number = self.id_number_var.get().strip()
             phone = self.phone_var.get().strip()
             dob = self.dob_var.get().strip()
             address = self.address_var.get().strip()
@@ -114,6 +123,9 @@ class CustomerLoginUIFrame(ttk.Frame):
             if len(name) < 2:
                 messagebox.showerror("Error", "Name must be at least 2 letters long.")
                 return
+            if len(id_number) != 9 or not id_number.isdigit():
+                messagebox.showerror("Error", "ID number (Teudat Zehut) must be exactly 9 digits.")
+                return
             if len(phone) != 10 or not phone.isdigit():
                 messagebox.showerror("Error", "Phone number must be exactly 10 digits.")
                 return
@@ -125,7 +137,7 @@ class CustomerLoginUIFrame(ttk.Frame):
                 return
                 
             try:
-                customer = self.parent.db.create_customer(name, phone, email, dob, password_hash, address)
+                customer = self.parent.db.create_customer(name, phone, email, dob, password_hash, address, id_number)
                 messagebox.showinfo("Success", "Registration successful!")
                 from CustomerUIFrame import CustomerUIFrame
                 self.parent.switch_frame(CustomerUIFrame, customer)
