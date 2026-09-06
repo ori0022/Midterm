@@ -74,7 +74,8 @@ The project builds a natural language conversation layer on top of Haovdim Bank'
    ```
    *(Note: If no API key is provided, the system seamlessly uses its intelligent built-in fallback parser, allowing 100% test scenario success offline).*
 
-5. **Seed the Database** (Ensures $\ge 5$ records per entity):
+5. **Initialize or Reset the Database** *(Optional)*:
+   Database tables are automatically created on first run. If you wish to reset all tables to a completely clean, empty state:
    ```bash
    python seed_data.py
    ```
@@ -130,19 +131,21 @@ When changes are pushed to GitHub, follow this standard, consistent procedure to
    pip install -r requirements.txt
    ```
 
-6. **Apply any database migrations or data updates**:
+6. **Verify Database Schema Integrity**:
+   Ensure SQLite tables exist without altering or wiping existing customer data:
    ```bash
-   python seed_data.py
+   python -c "from database import DatabaseManager; DatabaseManager()"
    ```
+   *(Note: Do NOT run `seed_data.py` here, as it is strictly a data-wiping script for development resets).*
 
-7. **Run the automated test suite to ensure release integrity**:
+7. **Run the Automated Test Suite to Ensure Release Integrity**:
    ```bash
    python test_scenarios.py
    ```
-   *(Proceed to restart only if all test assertions PASS).*
+   *(Proceed to restart only if all 5 test scenarios PASS with zero data leaks).*
 
 8. **Restart the Application Service**:
-   - **If running with systemd** (Recommended for Linux servers):
+   - **If running with systemd** (Recommended for production Linux servers):
      ```bash
      sudo systemctl restart haovdim-bank.service
      sudo systemctl status haovdim-bank.service
@@ -153,15 +156,15 @@ When changes are pushed to GitHub, follow this standard, consistent procedure to
      ```
    - **If running in background / screen / tmux**:
      ```bash
-     # Find and terminate existing process
      pkill -f "api_server.py" || pkill -f "uvicorn"
-     # Relaunch in background
      nohup python api_server.py > app.log 2>&1 &
      ```
 
-9. **Verify Health**:
+9. **Verify Health & Logs**:
    ```bash
    curl -I http://localhost:8000/docs
+   # View live application logs:
+   sudo journalctl -u haovdim-bank.service -f -n 50
    ```
 
 ### B. Standard `systemd` Service Unit Example (`/etc/systemd/system/haovdim-bank.service`)
@@ -178,8 +181,50 @@ ExecStart=/path/to/Midterm/.venv/bin/uvicorn api_server:app --host 0.0.0.0 --por
 Restart=always
 RestartSec=5
 
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
 [Install]
 WantedBy=multi-user.target
+```
+
+### C. Automated One-Command Server Update Script (`deploy.sh`)
+For automated deployments on the remote server, run `./deploy.sh` directly:
+```bash
+#!/bin/bash
+set -e
+
+echo "=== [1/5] Fetching and pulling latest changes from GitHub ==="
+git fetch origin
+git pull origin main
+
+echo "=== [2/5] Updating dependencies in virtual environment ==="
+source .venv/bin/activate
+pip install -r requirements.txt --quiet
+
+echo "=== [3/5] Verifying database schema ==="
+python -c "from database import DatabaseManager; DatabaseManager()"
+
+echo "=== [4/5] Running automated verification test suite ==="
+python test_scenarios.py
+
+echo "=== [5/5] Restarting haovdim-bank service ==="
+sudo systemctl restart haovdim-bank.service
+sudo systemctl is-active --quiet haovdim-bank.service && echo ">>> Server update successful! Service is active."
+```
+
+### D. Rollback Procedure
+If `python test_scenarios.py` fails or an issue occurs after pulling:
+```bash
+# 1. Roll back Git repository to previous commit
+git reset --hard HEAD@{1}
+
+# 2. Re-install previously working dependencies
+pip install -r requirements.txt
+
+# 3. Restart the service to restore stability
+sudo systemctl restart haovdim-bank.service
 ```
 
 ---

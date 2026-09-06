@@ -102,6 +102,27 @@ Clears all customer, appointment, invoice, and lead records, leaving all lists c
 
 ---
 
+## REST API Documentation & Endpoints
+
+When `api_server.py` is running, visit **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)** for interactive Swagger UI documentation.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/customers` | Retrieve all customers or search by name (`?search=`) |
+| `GET` | `/api/customers/{customer_id}` | Retrieve single customer details |
+| `POST` | `/api/customers` | Register a new customer with national ID |
+| `GET` | `/api/appointments` | Retrieve appointments (optionally filter by `?customer_id=`) |
+| `POST` | `/api/appointments` | Create a new appointment |
+| `PATCH` | `/api/appointments/{id}/cancel` | Cancel an appointment |
+| `PATCH` | `/api/appointments/{id}/reschedule` | Move / reschedule an appointment |
+| `GET` | `/api/invoices` | Retrieve customer invoices |
+| `GET` | `/api/leads` | Retrieve bank leads |
+| `POST` | `/api/chat` | Main chatbot conversational endpoint |
+| `POST` | `/api/chat/reset` | Reset conversation session |
+| `GET` | `/api/chat/session/{session_id}` | Retrieve conversation session state |
+
+---
+
 ## Troubleshooting
 
 - **Port 8000 in use**: Run with `python -m uvicorn api_server:app --port 8080`.
