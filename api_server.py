@@ -1,7 +1,9 @@
 import os
 import uuid
+import secrets
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Header, Security
+from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +56,33 @@ app.add_middleware(
 db = DatabaseManager()
 chatbot = ChatbotService()
 
+# --- Authentication & Authorization Layer ---
+BANK_API_KEY = os.getenv("BANK_API_KEY", os.getenv("INTERNAL_API_KEY", "haovdim_bank_internal_secret_key_2026"))
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(
+    x_api_key: Optional[str] = Security(api_key_header),
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Validates that incoming requests to entity/admin endpoints provide
+    a valid internal API key via X-API-Key header or Authorization Bearer token.
+    Prevents unauthorized entity enumeration and direct API tampering.
+    """
+    token = x_api_key
+    if not token and authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization[7:].strip()
+        else:
+            token = authorization.strip()
+
+    if not token or token != BANK_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized: Valid X-API-Key header or Bearer token is required to access this endpoint."
+        )
+    return token
+
 # --- Pydantic Models for API Requests / Responses ---
 
 class ChatRequest(BaseModel):
@@ -69,7 +98,7 @@ class CustomerResponse(BaseModel):
     phone: str
     email: str
     dob: Optional[str] = None
-    address: str
+    address: Optional[str] = None
 
 class VerifyIdRequest(BaseModel):
     id_number: str
@@ -108,9 +137,11 @@ class AppointmentRescheduleRequest(BaseModel):
 
 # --- Entity REST API Endpoints ---
 
-@app.get("/api/customers", response_model=List[CustomerResponse], tags=["Customers"])
+# --- Entity REST API Endpoints (Protected by Internal API Key) ---
+
+@app.get("/api/customers", response_model=List[CustomerResponse], tags=["Customers"], dependencies=[Depends(verify_api_key)])
 def get_customers(search: Optional[str] = Query(None, description="Search by partial or full customer name")):
-    """Retrieve all customers or search by name. PII like ID numbers are withheld for privacy."""
+    """Retrieve all customers or search by name. PII like ID numbers, DOB, and address are withheld for privacy."""
     if search:
         customers = db.search_customers_by_name(search)
     else:
@@ -121,13 +152,13 @@ def get_customers(search: Optional[str] = Query(None, description="Search by par
             name=c.name,
             phone=c.phone,
             email=c.email,
-            dob=c.dob,
-            address=c.address
+            dob=None,       # Withheld for privacy
+            address=None    # Withheld for privacy
         )
         for c in customers
     ]
 
-@app.get("/api/customers/{customer_id}", response_model=CustomerResponse, tags=["Customers"])
+@app.get("/api/customers/{customer_id}", response_model=CustomerResponse, tags=["Customers"], dependencies=[Depends(verify_api_key)])
 def get_customer_by_id(customer_id: int):
     """Retrieve a single customer by ID without exposing national ID number."""
     customer = db.get_customer_by_id(customer_id)
@@ -142,7 +173,7 @@ def get_customer_by_id(customer_id: int):
         address=customer.address
     )
 
-@app.post("/api/customers/{customer_id}/verify-id", response_model=VerifyIdResponse, tags=["Customers"])
+@app.post("/api/customers/{customer_id}/verify-id", response_model=VerifyIdResponse, tags=["Customers"], dependencies=[Depends(verify_api_key)])
 def verify_customer_id_endpoint(customer_id: int, req: VerifyIdRequest):
     """
     Securely verify a customer's ID number without exposing the actual ID in API responses.
@@ -177,7 +208,7 @@ def create_customer_endpoint(req: CustomerCreateRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/api/appointments", response_model=List[AppointmentResponse], tags=["Appointments"])
+@app.get("/api/appointments", response_model=List[AppointmentResponse], tags=["Appointments"], dependencies=[Depends(verify_api_key)])
 def get_appointments(customer_id: Optional[int] = Query(None, description="Filter appointments by customer ID")):
     """Retrieve appointments, optionally filtered by customer ID."""
     if customer_id is not None:
@@ -197,21 +228,21 @@ def get_appointments(customer_id: Optional[int] = Query(None, description="Filte
         for a in appointments
     ]
 
-@app.patch("/api/appointments/{appointment_id}/cancel", tags=["Appointments"])
-def cancel_appointment_endpoint(appointment_id: int, customer_id: Optional[int] = Query(None, description="Optional customer ID for ownership check")):
-    """Cancel an appointment by ID with existence, status, and ownership validation."""
+@app.patch("/api/appointments/{appointment_id}/cancel", tags=["Appointments"], dependencies=[Depends(verify_api_key)])
+def cancel_appointment_endpoint(appointment_id: int, customer_id: int = Query(..., description="Mandatory customer ID for ownership check")):
+    """Cancel an appointment by ID with existence, status, and mandatory ownership validation."""
     app_record = db.get_appointment_by_id(appointment_id)
     if not app_record:
         raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
+    if app_record.customer_id != customer_id:
+        raise HTTPException(status_code=403, detail="You are not authorized to cancel this appointment.")
     if app_record.status == "Cancelled":
         raise HTTPException(status_code=400, detail=f"Appointment {appointment_id} is already cancelled.")
-    if customer_id is not None and app_record.customer_id != customer_id:
-        raise HTTPException(status_code=403, detail="You are not authorized to cancel this appointment.")
 
     db.update_appointment_status(appointment_id, "Cancelled")
     return {"message": f"Appointment {appointment_id} cancelled successfully."}
 
-@app.post("/api/appointments", response_model=AppointmentResponse, tags=["Appointments"])
+@app.post("/api/appointments", response_model=AppointmentResponse, tags=["Appointments"], dependencies=[Depends(verify_api_key)])
 def create_appointment_endpoint(req: AppointmentCreateRequest):
     """Create a new appointment for a customer."""
     try:
@@ -228,23 +259,23 @@ def create_appointment_endpoint(req: AppointmentCreateRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.patch("/api/appointments/{appointment_id}/reschedule", tags=["Appointments"])
-def reschedule_appointment_endpoint(appointment_id: int, req: AppointmentRescheduleRequest, customer_id: Optional[int] = Query(None, description="Optional customer ID for ownership check")):
-    """Reschedule an appointment to a new date and time with existence, status, and ownership validation."""
+@app.patch("/api/appointments/{appointment_id}/reschedule", tags=["Appointments"], dependencies=[Depends(verify_api_key)])
+def reschedule_appointment_endpoint(appointment_id: int, req: AppointmentRescheduleRequest, customer_id: int = Query(..., description="Mandatory customer ID for ownership check")):
+    """Reschedule an appointment to a new date and time with existence, status, and mandatory ownership validation."""
     app_record = db.get_appointment_by_id(appointment_id)
     if not app_record:
         raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
-    if app_record.status == "Cancelled":
-        raise HTTPException(status_code=400, detail=f"Cannot reschedule an appointment that has already been cancelled.")
-    if customer_id is not None and app_record.customer_id != customer_id:
+    if app_record.customer_id != customer_id:
         raise HTTPException(status_code=403, detail="You are not authorized to reschedule this appointment.")
+    if app_record.status == "Cancelled":
+        raise HTTPException(status_code=400, detail="Cannot reschedule an appointment that has already been cancelled.")
     try:
         db.reschedule_appointment(appointment_id, req.new_date, req.new_time)
         return {"message": f"Appointment {appointment_id} rescheduled to {req.new_date} at {req.new_time}."}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/api/invoices", tags=["Invoices"])
+@app.get("/api/invoices", tags=["Invoices"], dependencies=[Depends(verify_api_key)])
 def get_invoices(customer_id: Optional[int] = Query(None, description="Filter invoices by customer ID")):
     """Retrieve invoices, optionally filtered by customer ID."""
     if customer_id is not None:
@@ -261,7 +292,7 @@ def get_invoices(customer_id: Optional[int] = Query(None, description="Filter in
         for inv in invoices
     ]
 
-@app.get("/api/leads", tags=["Leads"])
+@app.get("/api/leads", tags=["Leads"], dependencies=[Depends(verify_api_key)])
 def get_leads():
     """Retrieve all leads."""
     leads = db.get_all_leads()
@@ -283,11 +314,11 @@ def get_leads():
 def chat_endpoint(req: ChatRequest):
     """
     Send a message to the verification & appointment chatbot.
-    Auto-generates a unique session_id if none is provided.
+    Auto-generates a cryptographically secure session_id if none is provided.
     """
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
-    session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else f"session_{uuid.uuid4().hex[:12]}"
+    session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else f"session_{secrets.token_hex(16)}"
     result = chatbot.process_message(session_id, req.message)
     return result
 
@@ -295,19 +326,20 @@ def chat_endpoint(req: ChatRequest):
 def reset_chat_endpoint(req: ResetRequest):
     """
     Reset conversation state for a given session.
-    Auto-generates a unique session_id if none is provided.
+    Auto-generates a cryptographically secure session_id if none is provided.
     """
-    session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else f"session_{uuid.uuid4().hex[:12]}"
+    session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else f"session_{secrets.token_hex(16)}"
     session = chatbot.reset_session(session_id)
     return {
         "message": f"Session {session_id} reset successfully.",
         "session": session.to_dict()
     }
 
-@app.get("/api/chat/session/{session_id}", tags=["Chatbot"])
+@app.get("/api/chat/session/{session_id}", tags=["Chatbot"], dependencies=[Depends(verify_api_key)])
 def get_session_endpoint(session_id: str):
     """
-    Get current state of a conversation session.
+    Get current state of a conversation session (internal/diagnostic endpoint).
+    Requires API key to prevent session probing.
     """
     session = chatbot.get_session(session_id)
     return session.to_dict()

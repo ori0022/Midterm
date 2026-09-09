@@ -123,8 +123,8 @@ class NLULayer:
             result["intent"] = "register"
             return result
 
-        # 2. ID Number extraction (sequence of 5 to 10 digits)
-        id_match = re.search(r'\b\d{5,10}\b', msg)
+        # 2. ID Number extraction (sequence of exactly 9 digits for Israeli ID)
+        id_match = re.search(r'\b\d{9}\b', msg)
         if id_match:
             result["id_number"] = id_match.group(0)
             result["intent"] = "provide_id"

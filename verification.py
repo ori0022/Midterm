@@ -36,6 +36,7 @@ class SessionData:
         self.max_attempts: int = 3
         self.verified: bool = False
         self.history: List[Dict[str, str]] = []
+        self.last_activity: float = time.time()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -49,8 +50,16 @@ class SessionData:
             "registration_step": self.registration_step
         }
 
+def _mask_extracted(extracted: Dict[str, Any]) -> Dict[str, Any]:
+    """Redact sensitive PII such as national ID numbers from debug logging."""
+    safe = dict(extracted)
+    if safe.get("id_number"):
+        safe["id_number"] = "[REDACTED]"
+    return safe
+
 class ChatbotService:
     LOCKOUT_DURATION_SECONDS = 900  # 15 minutes lockout on 3 failed attempts
+    SESSION_TTL_SECONDS = 3600       # 1 hour session TTL to prevent memory leaks
 
     def __init__(self, nlu: Optional[NLULayer] = None, api_client: Optional[BankApiClient] = None):
         self.nlu = nlu or NLULayer()
@@ -59,12 +68,23 @@ class ChatbotService:
         self.customer_lockouts: Dict[int, float] = {}
         self.customer_failed_attempts: Dict[int, int] = {}
 
+    def _cleanup_stale_sessions(self):
+        """Prune in-memory sessions that have been inactive beyond the TTL."""
+        now = time.time()
+        stale_keys = [sid for sid, s in self.sessions.items() if now - getattr(s, "last_activity", now) > self.SESSION_TTL_SECONDS]
+        for sid in stale_keys:
+            del self.sessions[sid]
+
     def get_session(self, session_id: str) -> SessionData:
+        self._cleanup_stale_sessions()
         if session_id not in self.sessions:
             self.sessions[session_id] = SessionData(session_id)
+        else:
+            self.sessions[session_id].last_activity = time.time()
         return self.sessions[session_id]
 
     def reset_session(self, session_id: str) -> SessionData:
+        self._cleanup_stale_sessions()
         self.sessions[session_id] = SessionData(session_id)
         return self.sessions[session_id]
 
@@ -83,14 +103,14 @@ class ChatbotService:
         if session.state == ConversationState.BLOCKED:
             reply = (
                 "This conversation has been locked due to exceeding the maximum allowed verification attempts. "
-                "For your security, please contact Haovdim Bank branch support or start a new session."
+                "For your security, please contact Haovdim Bank branch support."
             )
             session.history.append({"role": "bot", "content": reply})
             return {"reply": reply, "session": session.to_dict()}
 
         # 1. NLU Layer
         extracted = self.nlu.extract_information(user_message, current_state=session.state)
-        print(f"[DEBUG Session {session_id}] State={session.state}, Extracted={extracted}")
+        print(f"[DEBUG Session {session_id}] State={session.state}, Extracted={_mask_extracted(extracted)}")
 
         reply = ""
 
@@ -374,12 +394,24 @@ class ChatbotService:
 
         entered_id = extracted.get("id_number")
         if not entered_id:
-            # Try to grab any digits from the raw message
-            digit_match = re.search(r'\b\d{5,10}\b', user_message)
+            # Check for exactly 9 digits for Israeli ID
+            digit_match = re.search(r'\b\d{9}\b', user_message)
             if digit_match:
                 entered_id = digit_match.group(0)
 
+        # Check if the user entered a phone number or invalid digit count without burning an attempt
         if not entered_id:
+            phone_match = re.search(r'\b0\d{8,9}\b', user_message) or re.search(r'\b\d{10}\b', user_message)
+            if phone_match:
+                return (
+                    "It looks like you provided a phone number. "
+                    "Please provide your 9-digit Israeli ID number (Teudat Zehut) for verification."
+                )
+            if any(char.isdigit() for char in user_message):
+                return (
+                    "National ID number must be exactly 9 digits. "
+                    "Please provide your 9-digit Israeli ID number (Teudat Zehut) for verification."
+                )
             return "Please provide your ID number to verify your identity (numbers only)."
 
         cust_id = candidate.get("id")
@@ -581,111 +613,122 @@ class ChatbotService:
 
         intent = self._detect_verified_intent(user_message)
 
-        # --- OPTION 1: View Appointments List ---
-        if intent == "view":
-            if not open_apps:
-                return (
-                    f"Appointments List:\n"
-                    f"You currently do not have any open or scheduled appointments, {candidate['name']}.\n\n"
-                    "Reply with 2 or say 'create an appointment' to book a visit."
+    def _handle_view_appointments(self, candidate: Dict[str, Any], open_apps: List[Dict[str, Any]]) -> str:
+        if not open_apps:
+            return (
+                f"Appointments List:\n"
+                f"You currently do not have any open or scheduled appointments, {candidate['name']}.\n\n"
+                "Reply with 2 or say 'create an appointment' to book a visit."
+            )
+        sorted_apps = sorted(open_apps, key=lambda a: self._parse_app_datetime(a.get("date", ""), a.get("time", "")) or datetime.max)
+        lines = [f"Your Scheduled Appointments, {candidate['name']}:"]
+        for a in sorted_apps:
+            disp_dt = self._to_display_date(a["date"])
+            lines.append(f"- {a['service_type']}: {disp_dt} at {a['time']} ({a['status']})")
+        lines.append("\nNeed to make changes? Type 3 to move/reschedule, or 4 to cancel.")
+        return "\n".join(lines)
+
+    def _handle_create_appointment(self, session: SessionData, candidate: Dict[str, Any], user_message: str) -> str:
+        booking = self._parse_booking_details(user_message)
+        if booking["date"] and booking["time"]:
+            try:
+                self.api.create_appointment(
+                    customer_id=candidate["id"],
+                    service_type=booking["service_type"],
+                    date=booking["date"],
+                    time=booking["time"]
                 )
-            sorted_apps = sorted(open_apps, key=lambda a: self._parse_app_datetime(a.get("date", ""), a.get("time", "")) or datetime.max)
-            lines = [f"Your Scheduled Appointments, {candidate['name']}:"]
-            for a in sorted_apps:
-                disp_dt = self._to_display_date(a["date"])
-                lines.append(f"- {a['service_type']}: {disp_dt} at {a['time']} ({a['status']})")
-            lines.append("\nNeed to make changes? Type 3 to move/reschedule, or 4 to cancel.")
-            return "\n".join(lines)
-
-        # --- OPTION 2: Create / Book an Appointment ---
-        elif intent == "create":
-            booking = self._parse_booking_details(user_message)
-            if booking["date"] and booking["time"]:
-                try:
-                    self.api.create_appointment(
-                        customer_id=candidate["id"],
-                        service_type=booking["service_type"],
-                        date=booking["date"],
-                        time=booking["time"]
-                    )
-                    display_dt = self._to_display_date(booking["date"])
-                    return (
-                        f"Appointment Confirmed!\n"
-                        f"Your appointment for {booking['service_type']} has been scheduled on {display_dt} at {booking['time']}.\n\n"
-                        "Is there anything else I can help you with?"
-                    )
-                except ValueError as e:
-                    return f"Could not schedule appointment: {str(e)}. Please choose another date or time."
-            else:
-                session.state = ConversationState.AWAITING_NEW_APPOINTMENT_DETAILS
-                session.pending_booking_date = booking["date"]
-                session.pending_booking_time = booking["time"]
-                session.pending_booking_service = booking["service_type"]
+                display_dt = self._to_display_date(booking["date"])
                 return (
-                    "Schedule a New Appointment:\n"
-                    "What date, time, and service would you like?\n"
-                    "(e.g. 04.09.2026 at 10:00 for New Account Opening, Investment Planning, Mortgage Consultation, or Personal Loan Application)"
-                )
-
-        # --- OPTION 3: Move / Reschedule an Appointment ---
-        elif intent == "reschedule":
-            if not open_apps:
-                return (
-                    f"You currently do not have any open appointments to move, {candidate['name']}.\n"
-                    "Reply with 2 if you would like to schedule a new appointment."
-                )
-
-            app = self._get_target_appointment(open_apps)
-            booking = self._parse_booking_details(user_message)
-            if booking["date"] and booking["time"]:
-                try:
-                    self.api.reschedule_appointment(app["id"], booking["date"], booking["time"])
-                    disp_new = self._to_display_date(booking["date"])
-                    return (
-                        f"Appointment Moved Successfully!\n"
-                        f"Your {app['service_type']} appointment has been rescheduled to {disp_new} at {booking['time']}.\n\n"
-                        "Is there anything else I can assist you with?"
-                    )
-                except ValueError as e:
-                    return f"Could not move appointment: {str(e)}. Please choose another date or time."
-            else:
-                session.state = ConversationState.AWAITING_RESCHEDULE_DETAILS
-                session.pending_reschedule_id = app["id"]
-                disp_curr = self._to_display_date(app["date"])
-                return (
-                    f"Move / Reschedule Appointment:\n"
-                    f"Your current appointment is on {disp_curr} at {app['time']} for {app['service_type']}.\n"
-                    "What new date and time would you like to move it to? (e.g. 15.09.2026 at 11:00)"
-                )
-
-        # --- OPTION 4: Cancel / Delete an Appointment ---
-        elif intent == "cancel":
-            if not open_apps:
-                return f"You currently do not have any open appointments to cancel, {candidate['name']}."
-
-            app = self._get_target_appointment(open_apps)
-            direct_cancels = [
-                "cancel", "cancel that appointment", "cancel appointment", "cancel it", 
-                "cancel my appointment", "please cancel", "delete appointment", "delete my appointment"
-            ]
-            if lower_msg in direct_cancels and lower_msg not in ["4", "4."]:
-                self.api.cancel_appointment(app["id"])
-                disp_dt = self._to_display_date(app["date"])
-                return (
-                    f"Your appointment on {disp_dt} at {app['time']} for {app['service_type']} "
-                    "has been successfully cancelled.\n\n"
+                    f"Appointment Confirmed!\n"
+                    f"Your appointment for {booking['service_type']} has been scheduled on {display_dt} at {booking['time']}.\n\n"
                     "Is there anything else I can help you with?"
                 )
-            else:
-                session.state = ConversationState.AWAITING_CANCELLATION_CONFIRMATION
-                session.pending_cancellation_id = app["id"]
-                disp_dt = self._to_display_date(app["date"])
-                return (
-                    f"Would you like me to cancel your {app['service_type']} appointment on "
-                    f"{disp_dt} at {app['time']}? (Please reply Yes to confirm, or No to keep it)"
-                )
+            except ValueError as e:
+                return f"Could not schedule appointment: {str(e)}. Please choose another date or time."
+        else:
+            session.state = ConversationState.AWAITING_NEW_APPOINTMENT_DETAILS
+            session.pending_booking_date = booking["date"]
+            session.pending_booking_time = booking["time"]
+            session.pending_booking_service = booking["service_type"]
+            return (
+                "Schedule a New Appointment:\n"
+                "What date, time, and service would you like?\n"
+                "(e.g. 04.09.2026 at 10:00 for New Account Opening, Investment Planning, Mortgage Consultation, or Personal Loan Application)"
+            )
 
-        # --- OPTION 5: Bank Services & Hours / Menu / Help ---
+    def _handle_reschedule_appointment(self, session: SessionData, candidate: Dict[str, Any], user_message: str, open_apps: List[Dict[str, Any]]) -> str:
+        if not open_apps:
+            return (
+                f"You currently do not have any open appointments to move, {candidate['name']}.\n"
+                "Reply with 2 if you would like to schedule a new appointment."
+            )
+
+        app = self._get_target_appointment(open_apps)
+        booking = self._parse_booking_details(user_message)
+        if booking["date"] and booking["time"]:
+            try:
+                self.api.reschedule_appointment(app["id"], booking["date"], booking["time"], customer_id=candidate["id"])
+                disp_new = self._to_display_date(booking["date"])
+                return (
+                    f"Appointment Moved Successfully!\n"
+                    f"Your {app['service_type']} appointment has been rescheduled to {disp_new} at {booking['time']}.\n\n"
+                    "Is there anything else I can assist you with?"
+                )
+            except ValueError as e:
+                return f"Could not move appointment: {str(e)}. Please choose another date or time."
+        else:
+            session.state = ConversationState.AWAITING_RESCHEDULE_DETAILS
+            session.pending_reschedule_id = app["id"]
+            disp_curr = self._to_display_date(app["date"])
+            return (
+                f"Move / Reschedule Appointment:\n"
+                f"Your current appointment is on {disp_curr} at {app['time']} for {app['service_type']}.\n"
+                "What new date and time would you like to move it to? (e.g. 15.09.2026 at 11:00)"
+            )
+
+    def _handle_cancel_appointment(self, session: SessionData, candidate: Dict[str, Any], user_message: str, lower_msg: str, open_apps: List[Dict[str, Any]]) -> str:
+        if not open_apps:
+            return f"You currently do not have any open appointments to cancel, {candidate['name']}."
+
+        app = self._get_target_appointment(open_apps)
+        direct_cancels = [
+            "cancel", "cancel that appointment", "cancel appointment", "cancel it", 
+            "cancel my appointment", "please cancel", "delete appointment", "delete my appointment"
+        ]
+        if lower_msg in direct_cancels and lower_msg not in ["4", "4."]:
+            self.api.cancel_appointment(app["id"], customer_id=candidate["id"])
+            disp_dt = self._to_display_date(app["date"])
+            return (
+                f"Your appointment on {disp_dt} at {app['time']} for {app['service_type']} "
+                "has been successfully cancelled.\n\n"
+                "Is there anything else I can help you with?"
+            )
+        else:
+            session.state = ConversationState.AWAITING_CANCELLATION_CONFIRMATION
+            session.pending_cancellation_id = app["id"]
+            disp_dt = self._to_display_date(app["date"])
+            return (
+                f"Would you like me to cancel your {app['service_type']} appointment on "
+                f"{disp_dt} at {app['time']}? (Please reply Yes to confirm, or No to keep it)"
+            )
+
+    def _handle_verified_state(self, session: SessionData, user_message: str, extracted: Dict[str, Any]) -> str:
+        lower_msg = user_message.lower().strip()
+        candidate = session.candidate_customer
+        apps = self.api.get_customer_appointments(candidate["id"])
+        open_apps = [a for a in apps if a.get("status") in ["Pending", "Confirmed"]]
+
+        intent = self._detect_verified_intent(user_message)
+
+        if intent == "view":
+            return self._handle_view_appointments(candidate, open_apps)
+        elif intent == "create":
+            return self._handle_create_appointment(session, candidate, user_message)
+        elif intent == "reschedule":
+            return self._handle_reschedule_appointment(session, candidate, user_message, open_apps)
+        elif intent == "cancel":
+            return self._handle_cancel_appointment(session, candidate, user_message, lower_msg, open_apps)
         elif intent == "services_info":
             return (
                 "Haovdim Bank Information:\n"
@@ -719,7 +762,8 @@ class ChatbotService:
         if confirmation is True or any(w in lower_msg for w in ["yes", "yeah", "yep", "sure", "cancel", "confirm", "please do"]):
             app_id = session.pending_cancellation_id
             if app_id:
-                self.api.cancel_appointment(app_id)
+                cust_id = session.candidate_customer["id"] if session.candidate_customer else None
+                self.api.cancel_appointment(app_id, customer_id=cust_id)
             session.pending_cancellation_id = None
             session.state = ConversationState.VERIFIED
             return (
@@ -784,7 +828,7 @@ class ChatbotService:
 
         if date and time:
             try:
-                self.api.reschedule_appointment(app_id, date, time)
+                self.api.reschedule_appointment(app_id, date, time, customer_id=candidate["id"])
                 session.state = ConversationState.VERIFIED
                 session.pending_reschedule_id = None
                 session.pending_booking_date = None

@@ -10,10 +10,16 @@ class BankApiClient:
     API Calls Layer: Encapsulates all communication with the Haovdim Bank Entity API.
     Supports HTTP REST communication and direct database fallback for standalone execution.
     """
-    def __init__(self, base_url: Optional[str] = None, db_manager: Optional[Any] = None):
+    def __init__(self, base_url: Optional[str] = None, db_manager: Optional[Any] = None, api_key: Optional[str] = None):
         self.base_url = (base_url or os.getenv("API_BASE_URL", "http://127.0.0.1:8000")).rstrip('/')
+        self.api_key = api_key or os.getenv("BANK_API_KEY", os.getenv("INTERNAL_API_KEY", "haovdim_bank_internal_secret_key_2026"))
         self._db = db_manager
         self._server_available = False if db_manager is not None else None
+
+    def _get_headers(self) -> Dict[str, str]:
+        return {
+            "X-API-Key": self.api_key
+        }
 
     def _is_server_available(self) -> bool:
         if requests is None:
@@ -36,7 +42,12 @@ class BankApiClient:
         """Search for customers by partial or full name."""
         if self._is_server_available():
             try:
-                resp = requests.get(f"{self.base_url}/api/customers", params={"search": query}, timeout=2.0)
+                resp = requests.get(
+                    f"{self.base_url}/api/customers",
+                    params={"search": query},
+                    headers=self._get_headers(),
+                    timeout=2.0
+                )
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:
@@ -61,7 +72,11 @@ class BankApiClient:
         """Retrieve customer details by customer ID."""
         if self._is_server_available():
             try:
-                resp = requests.get(f"{self.base_url}/api/customers/{customer_id}", timeout=2.0)
+                resp = requests.get(
+                    f"{self.base_url}/api/customers/{customer_id}",
+                    headers=self._get_headers(),
+                    timeout=2.0
+                )
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:
@@ -88,6 +103,7 @@ class BankApiClient:
                 resp = requests.post(
                     f"{self.base_url}/api/customers/{customer_id}/verify-id",
                     json={"id_number": clean_id},
+                    headers=self._get_headers(),
                     timeout=2.0
                 )
                 if resp.status_code == 200:
@@ -117,6 +133,7 @@ class BankApiClient:
                         "address": address,
                         "id_number": id_number
                     },
+                    headers=self._get_headers(),
                     timeout=3.0
                 )
                 if resp.status_code == 200:
@@ -145,7 +162,12 @@ class BankApiClient:
         """Retrieve appointments for a given customer."""
         if self._is_server_available():
             try:
-                resp = requests.get(f"{self.base_url}/api/appointments", params={"customer_id": customer_id}, timeout=2.0)
+                resp = requests.get(
+                    f"{self.base_url}/api/appointments",
+                    params={"customer_id": customer_id},
+                    headers=self._get_headers(),
+                    timeout=2.0
+                )
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:
@@ -170,7 +192,11 @@ class BankApiClient:
         """Retrieve all bank appointments."""
         if self._is_server_available():
             try:
-                resp = requests.get(f"{self.base_url}/api/appointments", timeout=2.0)
+                resp = requests.get(
+                    f"{self.base_url}/api/appointments",
+                    headers=self._get_headers(),
+                    timeout=2.0
+                )
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:
@@ -191,19 +217,32 @@ class BankApiClient:
             for a in apps
         ]
 
-    def cancel_appointment(self, appointment_id: int) -> bool:
-        """Cancel an appointment by ID."""
+    def cancel_appointment(self, appointment_id: int, customer_id: Optional[int] = None) -> bool:
+        """Cancel an appointment by ID with mandatory customer ownership check."""
         if self._is_server_available():
             try:
-                resp = requests.patch(f"{self.base_url}/api/appointments/{appointment_id}/cancel", timeout=2.0)
+                params = {}
+                if customer_id is not None:
+                    params["customer_id"] = customer_id
+                resp = requests.patch(
+                    f"{self.base_url}/api/appointments/{appointment_id}/cancel",
+                    params=params,
+                    headers=self._get_headers(),
+                    timeout=2.0
+                )
                 if resp.status_code == 200:
                     return True
+                elif resp.status_code in (400, 403, 404, 422):
+                    return False
             except Exception:
                 self._server_available = False
 
         db = self._get_db()
-        db.update_appointment_status(appointment_id, "Cancelled")
-        return True
+        if customer_id is not None:
+            rec = db.get_appointment_by_id(appointment_id)
+            if not rec or rec.customer_id != customer_id:
+                return False
+        return db.update_appointment_status(appointment_id, "Cancelled")
 
     def create_appointment(self, customer_id: int, service_type: str, date: str, time: str) -> Dict[str, Any]:
         """Create a new appointment for a customer."""
@@ -217,6 +256,7 @@ class BankApiClient:
                         "date": date,
                         "time": time
                     },
+                    headers=self._get_headers(),
                     timeout=2.0
                 )
                 if resp.status_code == 200:
@@ -236,21 +276,32 @@ class BankApiClient:
             "status": app.status
         }
 
-    def reschedule_appointment(self, appointment_id: int, new_date: str, new_time: str) -> bool:
-        """Reschedule an appointment to a new date and time."""
+    def reschedule_appointment(self, appointment_id: int, new_date: str, new_time: str, customer_id: Optional[int] = None) -> bool:
+        """Reschedule an appointment to a new date and time with mandatory customer ownership check."""
         if self._is_server_available():
             try:
+                params = {}
+                if customer_id is not None:
+                    params["customer_id"] = customer_id
                 resp = requests.patch(
                     f"{self.base_url}/api/appointments/{appointment_id}/reschedule",
+                    params=params,
                     json={"new_date": new_date, "new_time": new_time},
+                    headers=self._get_headers(),
                     timeout=2.0
                 )
                 if resp.status_code == 200:
                     return True
+                elif resp.status_code in (400, 403, 404, 422):
+                    return False
             except Exception:
                 self._server_available = False
 
         db = self._get_db()
+        if customer_id is not None:
+            rec = db.get_appointment_by_id(appointment_id)
+            if not rec or rec.customer_id != customer_id:
+                return False
         return db.reschedule_appointment(appointment_id, new_date, new_time)
 
     def get_invoices(self, customer_id: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -258,7 +309,12 @@ class BankApiClient:
         if self._is_server_available():
             try:
                 params = {"customer_id": customer_id} if customer_id else {}
-                resp = requests.get(f"{self.base_url}/api/invoices", params=params, timeout=2.0)
+                resp = requests.get(
+                    f"{self.base_url}/api/invoices",
+                    params=params,
+                    headers=self._get_headers(),
+                    timeout=2.0
+                )
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:
@@ -286,12 +342,17 @@ class BankApiClient:
 
     def get_leads(self) -> List[Dict[str, Any]]:
         """Retrieve all leads."""
-        try:
-            resp = requests.get(f"{self.base_url}/api/leads", timeout=2.0)
-            if resp.status_code == 200:
-                return resp.json()
-        except Exception:
-            pass
+        if self._is_server_available():
+            try:
+                resp = requests.get(
+                    f"{self.base_url}/api/leads",
+                    headers=self._get_headers(),
+                    timeout=2.0
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+            except Exception:
+                self._server_available = False
 
         db = self._get_db()
         leads = db.get_all_leads()

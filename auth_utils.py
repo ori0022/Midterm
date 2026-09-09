@@ -7,13 +7,15 @@ except ImportError:
 def hash_password(password: str) -> str:
     """
     Hash a password using salted bcrypt.
-    Falls back to SHA-256 if bcrypt is unavailable.
+    Raises RuntimeError if bcrypt is not installed to prevent insecure silent downgrade to SHA-256.
     """
-    if bcrypt is not None:
-        salt = bcrypt.gensalt()
-        return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
-    else:
-        return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    if bcrypt is None:
+        raise RuntimeError(
+            "bcrypt is required for password hashing but is not installed. "
+            "Insecure fallback to unsalted SHA-256 is disabled for security."
+        )
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """

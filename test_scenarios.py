@@ -357,9 +357,156 @@ def run_all_tests():
     assert new_user.name == "Ronit Bar"
     assert new_user.phone == "0521234567"
     assert new_user.id_number == "333444555"
-    print("  --> Step 9 PASS: Customer verified in database with bcrypt authentication.")
+    # -------------------------------------------------------------
+    # Scenario 8: Code Review Remediations & Zero-Leak API Hardening
+    # -------------------------------------------------------------
+    print_separator("TEST SCENARIO 8: Code Review Remediations & Zero-Leak API Hardening")
 
-    print_separator("ALL TEST SCENARIOS (MANDATORY + SECURITY + REGISTRATION) PASSED!")
+    # 8.1: Phone number / conversational text does not burn verification attempts
+    s8 = "test_s8"
+    svc.process_message(s8, "My name is Dana Shavit")
+    svc.process_message(s8, "Yes")
+    r_phone_warn = svc.process_message(s8, "Can I update my phone to 0541234567?")
+    print(f"User: Can I update my phone to 0541234567?")
+    print(f"Bot:  {r_phone_warn['reply']}")
+    assert "phone number" in r_phone_warn["reply"].lower() or "9-digit" in r_phone_warn["reply"].lower()
+    session_s8 = svc.get_session(s8)
+    assert session_s8.failed_attempts == 0, f"Expected 0 failed attempts after phone input, got {session_s8.failed_attempts}"
+    
+    # Text with non-9 digits
+    r_short = svc.process_message(s8, "My id is 1234")
+    assert "9 digits" in r_short["reply"].lower()
+    assert session_s8.failed_attempts == 0, f"Expected 0 failed attempts after short ID input, got {session_s8.failed_attempts}"
+    print("  --> 8.1 PASS: Phone numbers & conversational text do not burn verification attempts.")
+
+    # 8.2: Password Hashing Silent Downgrade Prevention
+    import auth_utils
+    orig_bcrypt = auth_utils.bcrypt
+    try:
+        auth_utils.bcrypt = None
+        try:
+            auth_utils.hash_password("test_pwd")
+            assert False, "Expected RuntimeError when bcrypt is unavailable"
+        except RuntimeError as e:
+            assert "bcrypt is required" in str(e)
+            print("  --> 8.2 PASS: Silent fallback to unsalted SHA-256 strictly prevented.")
+    finally:
+        auth_utils.bcrypt = orig_bcrypt
+
+    # 8.3: Seeding & Reset Scripts Verification
+    from seed_data import seed_database, clear_database
+    TEST_SEED_DB = "test_seed_isolated.db"
+    if os.path.exists(TEST_SEED_DB):
+        try:
+            os.remove(TEST_SEED_DB)
+        except Exception:
+            pass
+    db_seed = DatabaseManager(db_name=TEST_SEED_DB)
+    seed_database(db_seed)
+    assert len(db_seed.get_all_customers()) >= 5
+    assert len(db_seed.get_all_appointments()) >= 5
+    assert len(db_seed.get_all_leads()) >= 5
+    with db_seed.get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM Invoices")
+        assert c.fetchone()[0] >= 5
+    clear_database(db_seed)
+    assert len(db_seed.get_all_customers()) == 0
+    assert len(db_seed.get_all_appointments()) == 0
+    if os.path.exists(TEST_SEED_DB):
+        try:
+            os.remove(TEST_SEED_DB)
+        except Exception:
+            pass
+    print("  --> 8.3 PASS: seed_database() and clear_database() verified.")
+
+    # 8.4: Appointment Ownership Check (Fail-Closed)
+    all_custs = db.get_all_customers()
+    c1_rec = all_custs[0]
+    c2_rec = all_custs[1]
+    dana_apps = db.get_appointments_by_customer(c1_rec.id)
+    assert len(dana_apps) > 0
+    dana_app_id = dana_apps[0].id
+    
+    # Trying to cancel Dana's appointment with David's customer ID (c2_rec.id) fails
+    ownership_blocked = api.cancel_appointment(dana_app_id, customer_id=c2_rec.id)
+    assert ownership_blocked is False, "Ownership bypass: cancelled another customer's appointment!"
+    
+    # Trying to reschedule Dana's appointment with David's customer ID fails
+    resched_blocked = api.reschedule_appointment(dana_app_id, "2027-04-01", "10:00", customer_id=c2_rec.id)
+    assert resched_blocked is False, "Ownership bypass: rescheduled another customer's appointment!"
+    print("  --> 8.4 PASS: Fail-closed ownership validation on cancel & reschedule verified.")
+
+    # 8.5: REST API Authentication & PII Protection via FastAPI TestClient
+    from fastapi.testclient import TestClient
+    import api_server
+    api_server.db = db
+    api_server.chatbot = svc
+    client = TestClient(api_server.app)
+
+    # Unauthenticated curl to /api/customers -> 401 Unauthorized
+    resp_unauth = client.get("/api/customers")
+    assert resp_unauth.status_code == 401, f"Expected 401 Unauthorized, got {resp_unauth.status_code}"
+
+    # Unauthenticated curl to /api/appointments -> 401 Unauthorized
+    assert client.get("/api/appointments").status_code == 401
+
+    # Unauthenticated curl to /api/invoices -> 401 Unauthorized
+    assert client.get("/api/invoices").status_code == 401
+
+    # Unauthenticated curl to /api/leads -> 401 Unauthorized
+    assert client.get("/api/leads").status_code == 401
+
+    # Unauthenticated curl to /api/chat/session/xyz -> 401 Unauthorized
+    assert client.get("/api/chat/session/test_s1").status_code == 401
+
+    # Authenticated curl with X-API-Key -> 200 OK
+    headers = {"X-API-Key": api_server.BANK_API_KEY}
+    resp_auth = client.get("/api/customers", headers=headers)
+    assert resp_auth.status_code == 200
+    cust_data = resp_auth.json()
+    assert len(cust_data) >= 5
+    # Zero PII leak check: dob and address are withheld
+    assert cust_data[0]["dob"] is None, "SECURITY LEAK: dob exposed in customer listing!"
+    assert cust_data[0]["address"] is None, "SECURITY LEAK: address exposed in customer listing!"
+
+    # Cancel without customer_id -> 422 Unprocessable Entity
+    resp_no_cid = client.patch(f"/api/appointments/{dana_app_id}/cancel", headers=headers)
+    assert resp_no_cid.status_code == 422, f"Expected 422 Unprocessable Entity when customer_id missing, got {resp_no_cid.status_code}"
+
+    # Cancel with wrong customer_id -> 403 Forbidden
+    resp_wrong_cid = client.patch(f"/api/appointments/{dana_app_id}/cancel?customer_id={c2_rec.id}", headers=headers)
+    assert resp_wrong_cid.status_code == 403, f"Expected 403 Forbidden when customer_id does not match, got {resp_wrong_cid.status_code}"
+
+    # Reschedule without customer_id -> 422 Unprocessable Entity
+    resp_no_cid_resched = client.patch(
+        f"/api/appointments/{dana_app_id}/reschedule",
+        json={"new_date": "2027-05-01", "new_time": "11:00"},
+        headers=headers
+    )
+    assert resp_no_cid_resched.status_code == 422
+
+    # Reschedule with wrong customer_id -> 403 Forbidden
+    resp_wrong_cid_resched = client.patch(
+        f"/api/appointments/{dana_app_id}/reschedule?customer_id={c2_rec.id}",
+        json={"new_date": "2027-05-01", "new_time": "11:00"},
+        headers=headers
+    )
+    assert resp_wrong_cid_resched.status_code == 403
+
+    print("  --> 8.5 PASS: REST API Authentication Barrier & Fail-Closed Ownership completely verified.")
+
+    # 8.6: Chatbot Lockout Message Sanitization
+    s_lock = "test_s_lockout"
+    svc.process_message(s_lock, "My name is Tamar Ben-David")
+    svc.process_message(s_lock, "Yes")
+    svc.process_message(s_lock, "000000001")
+    svc.process_message(s_lock, "000000002")
+    r_locked = svc.process_message(s_lock, "000000003")
+    assert "start a new session" not in r_locked["reply"].lower(), "Bypass invitation found in lockout message!"
+    print("  --> 8.6 PASS: Lockout message sanitization verified.")
+
+    print_separator("ALL TEST SCENARIOS (MANDATORY + SECURITY + REGISTRATION + REMEDIATIONS) PASSED!")
 
 if __name__ == "__main__":
     exit_code = 0
