@@ -139,7 +139,7 @@ class AdminUIFrame(ttk.Frame):
 
     # --- Customers Tab ---
     def setup_customers_tab(self):
-        columns = ("ID", "Name", "Phone", "Email", "DOB", "Address")
+        columns = ("ID", "National ID", "Name", "Phone", "Email", "DOB", "Address")
         self.cust_tree = ttk.Treeview(self.customers_tab, columns=columns, show="headings")
         for col in columns:
             self.cust_tree.heading(col, text=col)
@@ -159,7 +159,7 @@ class AdminUIFrame(ttk.Frame):
         for row in self.cust_tree.get_children():
             self.cust_tree.delete(row)
         for c in self.parent.db.get_all_customers():
-            self.cust_tree.insert("", tk.END, values=(c.id, c.name, c.phone, c.email, c.dob, c.address))
+            self.cust_tree.insert("", tk.END, values=(c.id, c.id_number or "-", c.name, c.phone, c.email, c.dob, c.address))
             
     def delete_customer(self):
         selected = self.cust_tree.selection()
@@ -319,12 +319,17 @@ class AdminUIFrame(ttk.Frame):
         ad_var = tk.StringVar()
         ttk.Entry(top, textvariable=ad_var).grid(row=3, column=1, padx=5, pady=5)
         
+        ttk.Label(top, text="ID Number (9 digits):").grid(row=4, column=0, padx=5, pady=5)
+        id_num_var = tk.StringVar()
+        ttk.Entry(top, textvariable=id_num_var).grid(row=4, column=1, padx=5, pady=5)
+
         def save():
             import hashlib
             em = em_var.get().strip()
             pw = pw_var.get().strip()
             dob = dob_var.get().strip()
             ad = ad_var.get().strip()
+            id_num = id_num_var.get().strip()
             
             if not em or "@" not in em or not pw or not dob or not ad:
                 messagebox.showerror("Error", "All fields are required and valid.")
@@ -332,7 +337,7 @@ class AdminUIFrame(ttk.Frame):
                 
             pwd_hash = hashlib.sha256(pw.encode()).hexdigest()
             try:
-                self.parent.db.convert_lead(l_id, em, pwd_hash, dob, ad)
+                self.parent.db.convert_lead(l_id, em, pwd_hash, dob, ad, id_num or None)
                 messagebox.showinfo("Success", "Lead converted to Customer!")
                 self.refresh_leads()
                 self.refresh_customers()
@@ -340,4 +345,4 @@ class AdminUIFrame(ttk.Frame):
             except ValueError as e:
                 messagebox.showerror("Error", str(e))
                 
-        ttk.Button(top, text="Save Customer", command=save).grid(row=4, column=0, columnspan=2, pady=10)
+        ttk.Button(top, text="Save Customer", command=save).grid(row=5, column=0, columnspan=2, pady=10)
