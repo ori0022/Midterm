@@ -108,18 +108,40 @@ When `api_server.py` is running, visit **[http://127.0.0.1:8000/docs](http://127
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/customers` | Retrieve all customers or search by name (`?search=`) |
-| `GET` | `/api/customers/{customer_id}` | Retrieve single customer details |
-| `POST` | `/api/customers` | Register a new customer with national ID |
+| `GET` | `/api/customers` | Retrieve all customers or search by name (`?search=`) — PII like `id_number` is withheld |
+| `GET` | `/api/customers/{customer_id}` | Retrieve single customer details (PII withheld) |
+| `POST` | `/api/customers/{customer_id}/verify-id` | Securely verify customer ID without exposing PII in GET responses |
+| `POST` | `/api/customers` | Register a new customer with national ID & salted bcrypt password |
 | `GET` | `/api/appointments` | Retrieve appointments (optionally filter by `?customer_id=`) |
 | `POST` | `/api/appointments` | Create a new appointment |
-| `PATCH` | `/api/appointments/{id}/cancel` | Cancel an appointment |
-| `PATCH` | `/api/appointments/{id}/reschedule` | Move / reschedule an appointment |
+| `PATCH` | `/api/appointments/{id}/cancel` | Cancel an appointment (validates existence, cancellation state, and ownership) |
+| `PATCH` | `/api/appointments/{id}/reschedule` | Move / reschedule an appointment (validates existence, state, and ownership) |
 | `GET` | `/api/invoices` | Retrieve customer invoices |
 | `GET` | `/api/leads` | Retrieve bank leads |
-| `POST` | `/api/chat` | Main chatbot conversational endpoint |
+| `POST` | `/api/chat` | Main chatbot conversational endpoint (auto-assigns UUID session) |
 | `POST` | `/api/chat/reset` | Reset conversation session |
 | `GET` | `/api/chat/session/{session_id}` | Retrieve conversation session state |
+
+---
+
+## Security & Architecture Highlights
+
+1. **End-to-End PII Zero-Leak Protection**:
+   - `CustomerResponse` does not leak national identity numbers (`id_number`) over public GET endpoints.
+   - Verification is conducted via `POST /api/customers/{id}/verify-id`, ensuring the chatbot verification mechanism cannot be bypassed by querying the REST API.
+2. **Salted Bcrypt Password Hashing**:
+   - Passwords are encrypted with salted `bcrypt`, resilient against precomputed rainbow table attacks.
+   - Includes transparent fallback and auto-migration for legacy SHA-256 hashes.
+3. **Customer-Level Brute-Force Lockout**:
+   - Verification attempts are enforced not just per session, but globally across client session rotations.
+   - 3 consecutive failed verification attempts lock the customer record for 15 minutes.
+4. **Strict Appointment State & Ownership Validation**:
+   - Cancellation and rescheduling reject invalid IDs with `404 Not Found`.
+   - Prevent redundant cancellation of already-cancelled visits with `400 Bad Request`.
+   - Support `customer_id` parameter to enforce ownership checks (`403 Forbidden`).
+5. **CORS & Environment Configuration**:
+   - Compliant CORS settings without wildcard credential conflicts.
+   - `HOST`, `PORT`, and `DEBUG` controlled via environment variables (`HOST=127.0.0.1`, `DEBUG=false` by default).
 
 ---
 

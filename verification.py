@@ -1,4 +1,5 @@
 import re
+import time
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from nlu import NLULayer
@@ -13,6 +14,7 @@ class ConversationState:
     AWAITING_CANCELLATION_CONFIRMATION = "AWAITING_CANCELLATION_CONFIRMATION"
     AWAITING_NEW_APPOINTMENT_DETAILS = "AWAITING_NEW_APPOINTMENT_DETAILS"
     AWAITING_RESCHEDULE_DETAILS = "AWAITING_RESCHEDULE_DETAILS"
+    AWAITING_REGISTRATION = "AWAITING_REGISTRATION"
     BLOCKED = "BLOCKED"
 
 class SessionData:
@@ -28,6 +30,8 @@ class SessionData:
         self.pending_booking_date: Optional[str] = None
         self.pending_booking_time: Optional[str] = None
         self.pending_booking_service: Optional[str] = None
+        self.registration_data: Dict[str, Any] = {}
+        self.registration_step: Optional[str] = None
         self.failed_attempts: int = 0
         self.max_attempts: int = 3
         self.verified: bool = False
@@ -41,14 +45,19 @@ class SessionData:
             "claimed_date": self.claimed_date,
             "candidate_customer": self.candidate_customer["name"] if self.candidate_customer else None,
             "failed_attempts": self.failed_attempts,
-            "verified": self.verified
+            "verified": self.verified,
+            "registration_step": self.registration_step
         }
 
 class ChatbotService:
+    LOCKOUT_DURATION_SECONDS = 900  # 15 minutes lockout on 3 failed attempts
+
     def __init__(self, nlu: Optional[NLULayer] = None, api_client: Optional[BankApiClient] = None):
         self.nlu = nlu or NLULayer()
         self.api = api_client or BankApiClient()
         self.sessions: Dict[str, SessionData] = {}
+        self.customer_lockouts: Dict[int, float] = {}
+        self.customer_failed_attempts: Dict[int, int] = {}
 
     def get_session(self, session_id: str) -> SessionData:
         if session_id not in self.sessions:
@@ -110,6 +119,9 @@ class ChatbotService:
         elif session.state == ConversationState.AWAITING_RESCHEDULE_DETAILS:
             reply = self._handle_reschedule_details_state(session, user_message, extracted)
 
+        elif session.state == ConversationState.AWAITING_REGISTRATION:
+            reply = self._handle_registration_state(session, user_message, extracted)
+
         else:
             reply = "How may I assist you with your Haovdim Bank appointment today?"
 
@@ -117,6 +129,19 @@ class ChatbotService:
         return {"reply": reply, "session": session.to_dict()}
 
     def _handle_init_state(self, session: SessionData, user_message: str, extracted: Dict[str, Any]) -> str:
+        user_lower = user_message.lower().strip()
+
+        # 0. Check if user wants to register as a new customer
+        if extracted.get("intent") == "register" or any(w in user_lower for w in ["register", "new customer", "sign up", "create account", "create user", "new user", "open account"]):
+            session.state = ConversationState.AWAITING_REGISTRATION
+            session.registration_data = {}
+            session.registration_step = "name"
+            return (
+                "👋 Welcome to Haovdim Bank Registration!\n\n"
+                "I will guide you through creating your new customer account step-by-step.\n"
+                "First, what is your Full Name? (At least 2 characters)"
+            )
+
         name = extracted.get("name")
         claimed_date = extracted.get("claimed_date")
 
@@ -126,8 +151,8 @@ class ChatbotService:
         if not name:
             return (
                 "Welcome to Haovdim Bank Virtual Assistant!\n\n"
-                "To access your appointments and personal banking services, please introduce yourself with your full name "
-                "(e.g. My name is [Your Name])."
+                "To access your appointments and personal banking services, please introduce yourself with your full name.\n\n"
+                "Don't have an account yet? Type \"I am a new customer\" or \"register\" to create one!"
             )
 
         session.claimed_name = name
@@ -139,7 +164,8 @@ class ChatbotService:
             # Edge Case: Name doesn't exist
             return (
                 f"I'm sorry, I couldn't find any customer matching '{name}' in our system. "
-                "Please verify your name or contact customer support."
+                "Please verify your name or contact customer support. "
+                "If you are a new customer, reply 'register' to open an account."
             )
 
         elif len(matches) == 1:
@@ -160,17 +186,29 @@ class ChatbotService:
     def _handle_name_confirmation_state(self, session: SessionData, user_message: str, extracted: Dict[str, Any]) -> str:
         confirmation = extracted.get("confirmation")
         cand_name = session.candidate_customer["name"] if session.candidate_customer else ""
+        user_lower = user_message.strip().lower()
+
+        # Check if user wants to register instead
+        if extracted.get("intent") == "register" or any(w in user_lower for w in ["register", "new customer", "sign up", "create user"]):
+            session.state = ConversationState.AWAITING_REGISTRATION
+            session.registration_data = {}
+            session.registration_step = "name"
+            return (
+                "👋 Welcome to Haovdim Bank Registration!\n\n"
+                "I will guide you through creating your new customer account step-by-step.\n"
+                "First, what is your Full Name? (At least 2 characters)"
+            )
 
         # If user explicitly provides an ID number right away
         if extracted.get("id_number"):
             session.state = ConversationState.AWAITING_ID_VERIFICATION
             return self._handle_id_verification_state(session, user_message, extracted)
 
-        if confirmation is True or user_message.strip().lower() in ["yes", "yeah", "yep", "correct", "that's me", "thats me", "true", "sure"]:
+        if confirmation is True or user_lower in ["yes", "yeah", "yep", "correct", "that's me", "thats me", "true", "sure"]:
             session.state = ConversationState.AWAITING_ID_VERIFICATION
             return "What is your ID number? (For verification purposes only)"
 
-        elif confirmation is False or user_message.strip().lower() in ["no", "nope", "wrong", "not me"]:
+        elif confirmation is False or user_lower in ["no", "nope", "wrong", "not me"]:
             session.state = ConversationState.INIT
             session.candidate_customer = None
             return "I apologize. Could you please provide your full name so I can locate your account?"
@@ -182,6 +220,126 @@ class ChatbotService:
                 return "What is your ID number? (For verification purposes only)"
             
             return f"Could you please confirm: Your name is {cand_name}? (Yes / No)"
+
+    def _handle_registration_state(self, session: SessionData, user_message: str, extracted: Dict[str, Any]) -> str:
+        msg = user_message.strip()
+        lower = msg.lower()
+        if lower in ["cancel", "stop", "abort", "exit"]:
+            session.state = ConversationState.INIT
+            session.registration_data = {}
+            session.registration_step = None
+            return "Registration has been cancelled. How else may I assist you with Haovdim Bank services today?"
+
+        step = session.registration_step or "name"
+
+        if step == "name":
+            # Validation: at least 2 characters and contains letters
+            clean_name = re.sub(r'^(?:my name is|i am|name is)\s+', '', msg, flags=re.IGNORECASE).strip()
+            if len(clean_name) < 2 or not any(c.isalpha() for c in clean_name):
+                return "Name must be at least 2 letters long. Please enter your Full Name:"
+            session.registration_data["name"] = clean_name
+            session.registration_step = "email"
+            return f"Thank you, {clean_name}.\nWhat is your Email address?"
+
+        elif step == "email":
+            # Validation: email must contain '@' and domain
+            if "@" not in msg or "." not in msg or len(msg) < 5:
+                return "A valid email containing '@' and a domain is required. Please enter your Email address:"
+            session.registration_data["email"] = msg.lower()
+            session.registration_step = "password"
+            return (
+                "Please choose a secure Password.\n"
+                "Requirement: At least 8 characters long and contain at least 1 uppercase letter:"
+            )
+
+        elif step == "password":
+            # Validation: at least 8 characters and contains 1 uppercase letter
+            if len(msg) < 8 or not any(c.isupper() for c in msg):
+                return (
+                    "Password does not meet requirements. It must be at least 8 characters long "
+                    "and contain at least 1 uppercase letter.\nPlease enter a valid Password:"
+                )
+            session.registration_data["password"] = msg
+            session.registration_step = "id_number"
+            return "What is your Israeli National ID Number? Exactly 9 digits:"
+
+        elif step == "id_number":
+            # Validation: exactly 9 digits
+            clean_id = re.sub(r'\D', '', msg)
+            if len(clean_id) != 9:
+                return "ID number (Teudat Zehut) must be exactly 9 digits. Please enter your 9-digit ID number:"
+            session.registration_data["id_number"] = clean_id
+            session.registration_step = "phone"
+            return "What is your Phone Number? Exactly 10 digits:"
+
+        elif step == "phone":
+            # Validation: exactly 10 digits
+            clean_phone = re.sub(r'\D', '', msg)
+            if len(clean_phone) != 10:
+                return "Phone number must be exactly 10 digits. Please enter your 10-digit Phone number:"
+            session.registration_data["phone"] = clean_phone
+            session.registration_step = "dob"
+            return "What is your Date of Birth? Format: Day/Month/Year:"
+
+        elif step == "dob":
+            # Validation: date format Day / Month / Year (DD/MM/YYYY or DD.MM.YYYY)
+            clean_dob = None
+            m_eu = re.search(r'(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})', msg)
+            if m_eu:
+                d, m, y = m_eu.groups()
+                if 1 <= int(d) <= 31 and 1 <= int(m) <= 12 and 1900 <= int(y) <= 2026:
+                    clean_dob = f"{y}-{int(m):02d}-{int(d):02d}"
+            else:
+                m_iso = re.search(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})', msg)
+                if m_iso:
+                    y, m, d = m_iso.groups()
+                    if 1 <= int(d) <= 31 and 1 <= int(m) <= 12 and 1900 <= int(y) <= 2026:
+                        clean_dob = f"{y}-{int(m):02d}-{int(d):02d}"
+
+            if not clean_dob:
+                return "Date of Birth format invalid. Please provide your Date of Birth in Day/Month/Year format:"
+
+            session.registration_data["dob"] = clean_dob
+            session.registration_step = "address"
+            return "Finally, what is your Residential Address? City and Street:"
+
+        elif step == "address":
+            if len(msg) < 2:
+                return "Address is required. Please enter your Residential Address:"
+            session.registration_data["address"] = msg
+
+            # All 7 fields collected! Perform registration
+            reg = session.registration_data
+            try:
+                created_cust = self.api.create_customer(
+                    name=reg["name"],
+                    phone=reg["phone"],
+                    email=reg["email"],
+                    password=reg["password"],
+                    dob=reg["dob"],
+                    address=reg["address"],
+                    id_number=reg["id_number"]
+                )
+                session.candidate_customer = created_cust
+                session.claimed_name = created_cust["name"]
+                session.verified = True
+                session.state = ConversationState.VERIFIED
+                session.registration_data = {}
+                session.registration_step = None
+                first_name = created_cust["name"].split()[0]
+                return (
+                    f"🎉 Registration successful! Welcome to Haovdim Bank, {first_name}!\n"
+                    f"Your customer account has been created and verified.\n\n"
+                    f"{self._get_services_menu(created_cust['name'])}"
+                )
+            except ValueError as e:
+                session.registration_step = "email"
+                return f"Registration error: {e}\nPlease enter a different Email address:"
+            except Exception as e:
+                session.state = ConversationState.INIT
+                session.registration_data = {}
+                session.registration_step = None
+                return f"We encountered an unexpected error during registration ({e}). Please try again later or contact bank support."
 
     def _handle_name_clarification_state(self, session: SessionData, user_message: str, extracted: Dict[str, Any]) -> str:
         # Check which candidate user selected
@@ -224,29 +382,49 @@ class ChatbotService:
         if not entered_id:
             return "Please provide your ID number to verify your identity (numbers only)."
 
-        # 3. Identity Verification Layer
-        expected_id_number = str(candidate.get("id_number") or candidate.get("id")).strip()
-        cleaned_entered_id = str(entered_id).strip()
-
-        if cleaned_entered_id == expected_id_number:
-            # Exact match! Verification successful
-            session.verified = True
-            session.state = ConversationState.VERIFIED
-
-            # 4. Response Based on Real Data
-            return self._formulate_appointment_details(session)
-        else:
-            # Mismatch: STRICT SECURITY - NEVER expose appointment info
-            session.failed_attempts += 1
-            remaining = session.max_attempts - session.failed_attempts
-
-            if session.failed_attempts >= session.max_attempts:
+        cust_id = candidate.get("id")
+        if cust_id is not None and cust_id in self.customer_lockouts:
+            lock_time = self.customer_lockouts[cust_id]
+            if time.time() - lock_time < self.LOCKOUT_DURATION_SECONDS:
                 session.state = ConversationState.BLOCKED
                 return (
                     "Verification failed. You have exceeded the maximum of 3 verification attempts. "
                     "For your protection, this session has been locked. Please contact Haovdim Bank branch support."
                 )
             else:
+                del self.customer_lockouts[cust_id]
+                self.customer_failed_attempts[cust_id] = 0
+
+        # 3. Identity Verification Layer via Secure API / DB without PII exposure
+        cleaned_entered_id = str(entered_id).strip()
+        is_valid = self.api.verify_customer_id(cust_id, cleaned_entered_id) if cust_id else False
+
+        if is_valid:
+            # Exact match! Verification successful
+            session.verified = True
+            session.state = ConversationState.VERIFIED
+            if cust_id in self.customer_failed_attempts:
+                del self.customer_failed_attempts[cust_id]
+
+            # 4. Response Based on Real Data
+            return self._formulate_appointment_details(session)
+        else:
+            # Mismatch: STRICT SECURITY - NEVER expose appointment info
+            session.failed_attempts += 1
+            curr_fails = (self.customer_failed_attempts.get(cust_id, 0) + 1) if cust_id else session.failed_attempts
+            if cust_id:
+                self.customer_failed_attempts[cust_id] = curr_fails
+
+            if session.failed_attempts >= session.max_attempts or curr_fails >= session.max_attempts:
+                session.state = ConversationState.BLOCKED
+                if cust_id:
+                    self.customer_lockouts[cust_id] = time.time()
+                return (
+                    "Verification failed. You have exceeded the maximum of 3 verification attempts. "
+                    "For your protection, this session has been locked. Please contact Haovdim Bank branch support."
+                )
+            else:
+                remaining = min(session.max_attempts - session.failed_attempts, session.max_attempts - curr_fails)
                 return (
                     f"The ID number provided does not match our records. "
                     f"You have {remaining} attempt{'s' if remaining > 1 else ''} remaining. "

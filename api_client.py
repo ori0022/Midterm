@@ -52,8 +52,7 @@ class BankApiClient:
                 "phone": c.phone,
                 "email": c.email,
                 "dob": c.dob,
-                "address": c.address,
-                "id_number": c.id_number
+                "address": c.address
             }
             for c in customers
         ]
@@ -77,10 +76,70 @@ class BankApiClient:
                 "phone": c.phone,
                 "email": c.email,
                 "dob": c.dob,
-                "address": c.address,
-                "id_number": c.id_number
+                "address": c.address
             }
         return None
+
+    def verify_customer_id(self, customer_id: int, id_number: str) -> bool:
+        """Securely verify customer ID number against the API or DB without exposing ID data."""
+        clean_id = id_number.strip()
+        if self._is_server_available():
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/api/customers/{customer_id}/verify-id",
+                    json={"id_number": clean_id},
+                    timeout=2.0
+                )
+                if resp.status_code == 200:
+                    return resp.json().get("verified", False)
+            except Exception:
+                self._server_available = False
+
+        # Fallback to direct DB query if API server is not running
+        db = self._get_db()
+        c = db.get_customer_by_id(customer_id)
+        if c and c.id_number:
+            return c.id_number.strip() == clean_id
+        return False
+
+    def create_customer(self, name: str, phone: str, email: str, password: str, dob: str, address: str, id_number: str) -> Dict[str, Any]:
+        """Register a new customer via REST API or direct DB fallback."""
+        if self._is_server_available():
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/api/customers",
+                    json={
+                        "name": name,
+                        "phone": phone,
+                        "email": email,
+                        "password": password,
+                        "dob": dob,
+                        "address": address,
+                        "id_number": id_number
+                    },
+                    timeout=3.0
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                elif resp.status_code == 400:
+                    raise ValueError(resp.json().get("detail", "Failed to create customer."))
+            except ValueError:
+                raise
+            except Exception:
+                self._server_available = False
+
+        db = self._get_db()
+        from auth_utils import hash_password
+        pw_hash = hash_password(password)
+        cust = db.create_customer(name, phone, email, dob, pw_hash, address, id_number)
+        return {
+            "id": cust.id,
+            "name": cust.name,
+            "phone": cust.phone,
+            "email": cust.email,
+            "dob": cust.dob,
+            "address": cust.address
+        }
 
     def get_customer_appointments(self, customer_id: int) -> List[Dict[str, Any]]:
         """Retrieve appointments for a given customer."""

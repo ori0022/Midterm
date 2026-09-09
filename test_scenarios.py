@@ -222,7 +222,144 @@ def run_all_tests():
     assert r1["session"]["state"] == ConversationState.INIT
     print("  --> PASS: Handled unregistered name gracefully.")
 
-    print_separator("ALL 5 MANDATORY TEST SCENARIOS PASSED WITH ZERO DATA LEAKS!")
+    # -------------------------------------------------------------
+    # Scenario 6: Review Remediation & Security Enhancements
+    # -------------------------------------------------------------
+    print_separator("TEST SCENARIO 6: Review Remediation & Security Hardening")
+    
+    # 6.1: Zero PII Leak in search_customers
+    dana_records = api.search_customers("Dana")
+    assert len(dana_records) > 0
+    assert "id_number" not in dana_records[0], "SECURITY LEAK: id_number found in customer search response!"
+    print("  --> 6.1 PASS: Customer search strictly withholds id_number (PII Protected).")
+
+    # 6.2: Salted Bcrypt Hashing & Backward Compatibility
+    from auth_utils import hash_password, verify_password
+    b_hash = hash_password("SecurePassword2026")
+    assert b_hash != "SecurePassword2026"
+    assert verify_password("SecurePassword2026", b_hash), "Bcrypt verification failed!"
+    assert not verify_password("WrongPassword", b_hash), "Bcrypt accepted invalid password!"
+    # Verify legacy SHA-256 fallback
+    sha_legacy = hashlib.sha256("legacy123".encode()).hexdigest()
+    assert verify_password("legacy123", sha_legacy), "Legacy SHA-256 verification fallback failed!"
+    print("  --> 6.2 PASS: Salted bcrypt password hashing & legacy fallback fully verified.")
+
+    # 6.3: Multi-Session Customer Brute-Force Lockout Prevention
+    # Attacker attempts to brute-force by rotating session IDs
+    rot_s1 = "attacker_session_1"
+    svc.process_message(rot_s1, "My name is Tamar Ben-David")
+    svc.process_message(rot_s1, "Yes")
+    r_rot1 = svc.process_message(rot_s1, "000000001")
+    assert "2 attempts remaining" in r_rot1["reply"]
+
+    rot_s2 = "attacker_session_2"
+    svc.process_message(rot_s2, "My name is Tamar Ben-David")
+    svc.process_message(rot_s2, "Yes")
+    r_rot2 = svc.process_message(rot_s2, "000000002")
+    assert "1 attempt remaining" in r_rot2["reply"]
+
+    rot_s3 = "attacker_session_3"
+    svc.process_message(rot_s3, "My name is Tamar Ben-David")
+    svc.process_message(rot_s3, "Yes")
+    r_rot3 = svc.process_message(rot_s3, "000000003")
+    assert "exceeded" in r_rot3["reply"].lower() or "locked" in r_rot3["reply"].lower()
+
+    # Session 4: Even with another new session, Tamar's account is locked!
+    rot_s4 = "attacker_session_4"
+    svc.process_message(rot_s4, "My name is Tamar Ben-David")
+    svc.process_message(rot_s4, "Yes")
+    r_rot4 = svc.process_message(rot_s4, "444333222") # Even correct ID is blocked
+    assert "locked" in r_rot4["reply"].lower() or "blocked" in r_rot4["reply"].lower()
+    print("  --> 6.3 PASS: Account lockout persists across rotated session IDs.")
+
+    # 6.4: Appointment Existence & Status Integrity
+    assert db.get_appointment_by_id(99999) is None, "Non-existent appointment ID returned data!"
+    test_app = appointments[0]
+    assert db.get_appointment_by_id(test_app.id) is not None
+    cancel_success = db.update_appointment_status(test_app.id, "Cancelled")
+    assert cancel_success is True
+    no_update = db.update_appointment_status(99999, "Cancelled")
+    assert no_update is False, "Updating non-existent appointment returned True!"
+    print("  --> 6.4 PASS: Appointment existence & status integrity checked.")
+
+    # 6.5: Layer Separation in Invoices
+    all_invs = db.get_all_invoices()
+    assert len(all_invs) >= 5
+    print("  --> 6.5 PASS: DatabaseManager.get_all_invoices layer consistency verified.")
+
+    # -------------------------------------------------------------
+    # Scenario 7: Conversational Registration Workflow & Validations
+    # -------------------------------------------------------------
+    print_separator("TEST SCENARIO 7: Conversational New Customer Registration")
+    s7 = "test_s7"
+
+    # Step 1: User says they are a new customer
+    r_reg1 = svc.process_message(s7, "I am a new customer")
+    assert r_reg1["session"]["state"] == ConversationState.AWAITING_REGISTRATION
+    assert "Full Name" in r_reg1["reply"]
+    print("  --> Step 1 PASS: Triggered registration flow, prompted for Name.")
+
+    # Step 2: Name validation
+    r_bad_name = svc.process_message(s7, "x")
+    assert "at least 2 letters" in r_bad_name["reply"].lower()
+    r_good_name = svc.process_message(s7, "Ronit Bar")
+    assert "Email" in r_good_name["reply"]
+    print("  --> Step 2 PASS: Validated name (>= 2 chars), prompted for Email.")
+
+    # Step 3: Email validation
+    r_bad_email = svc.process_message(s7, "invalid_email")
+    assert "valid email" in r_bad_email["reply"].lower()
+    r_good_email = svc.process_message(s7, "ronit.bar@bank.com")
+    assert "Password" in r_good_email["reply"]
+    print("  --> Step 3 PASS: Validated email (@ check), prompted for Password.")
+
+    # Step 4: Password validation (min 8 chars, 1 uppercase)
+    r_bad_pwd_short = svc.process_message(s7, "Short1")
+    assert "8 characters" in r_bad_pwd_short["reply"]
+    r_bad_pwd_no_upper = svc.process_message(s7, "longpasswordwithoutuppercase123")
+    assert "uppercase" in r_bad_pwd_no_upper["reply"].lower()
+    r_good_pwd = svc.process_message(s7, "SecurePass123")
+    assert "ID Number" in r_good_pwd["reply"]
+    print("  --> Step 4 PASS: Validated password (min 8 chars & 1 uppercase), prompted for ID.")
+
+    # Step 5: ID Number validation (9 digits)
+    r_bad_id = svc.process_message(s7, "12345")
+    assert "9 digits" in r_bad_id["reply"]
+    r_good_id = svc.process_message(s7, "333444555")
+    assert "Phone" in r_good_id["reply"]
+    print("  --> Step 5 PASS: Validated national ID (exactly 9 digits), prompted for Phone.")
+
+    # Step 6: Phone Number validation (10 digits)
+    r_bad_phone = svc.process_message(s7, "050123")
+    assert "10 digits" in r_bad_phone["reply"]
+    r_good_phone = svc.process_message(s7, "0521234567")
+    assert "Date of Birth" in r_good_phone["reply"]
+    print("  --> Step 6 PASS: Validated phone (exactly 10 digits), prompted for DOB.")
+
+    # Step 7: Date of Birth validation
+    r_bad_dob = svc.process_message(s7, "someday")
+    assert "Date of Birth format invalid" in r_bad_dob["reply"]
+    r_good_dob = svc.process_message(s7, "15.05.1992")
+    assert "Address" in r_good_dob["reply"]
+    print("  --> Step 7 PASS: Validated date of birth format, prompted for Address.")
+
+    # Step 8: Address & Registration Completion
+    r_done = svc.process_message(s7, "Tel Aviv, Dizengoff 100")
+    assert "Registration successful" in r_done["reply"]
+    assert "Ronit" in r_done["reply"]
+    assert r_done["session"]["state"] == ConversationState.VERIFIED
+    assert r_done["session"]["verified"] is True
+    print("  --> Step 8 PASS: Customer registered, session automatically transitioned to VERIFIED.")
+
+    # Step 9: Database verification
+    new_user = db.get_customer_by_auth("ronit.bar@bank.com", "SecurePass123")
+    assert new_user is not None
+    assert new_user.name == "Ronit Bar"
+    assert new_user.phone == "0521234567"
+    assert new_user.id_number == "333444555"
+    print("  --> Step 9 PASS: Customer verified in database with bcrypt authentication.")
+
+    print_separator("ALL TEST SCENARIOS (MANDATORY + SECURITY + REGISTRATION) PASSED!")
 
 if __name__ == "__main__":
     exit_code = 0

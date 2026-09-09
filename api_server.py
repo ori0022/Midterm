@@ -1,10 +1,13 @@
 import os
+import uuid
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from auth_utils import hash_password
+
 def _load_env():
     try:
         from dotenv import load_dotenv
@@ -22,8 +25,8 @@ def _load_env():
                             v = v.strip().strip("'\"")
                             if k not in os.environ:
                                 os.environ[k] = v
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[DEBUG] Notice while reading .env file: {e}")
 
 _load_env()
 
@@ -36,11 +39,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS
+# Enable CORS (compliant with CORS spec - credentials=False when wildcard/multi-origin)
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000,http://localhost:3000")
+allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,10 +58,10 @@ chatbot = ChatbotService()
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str = "default_session"
+    session_id: Optional[str] = None
 
 class ResetRequest(BaseModel):
-    session_id: str = "default_session"
+    session_id: Optional[str] = None
 
 class CustomerResponse(BaseModel):
     id: int
@@ -64,7 +70,13 @@ class CustomerResponse(BaseModel):
     email: str
     dob: Optional[str] = None
     address: str
-    id_number: Optional[str] = None
+
+class VerifyIdRequest(BaseModel):
+    id_number: str
+
+class VerifyIdResponse(BaseModel):
+    verified: bool
+    message: str
 
 class CustomerCreateRequest(BaseModel):
     name: str
@@ -98,7 +110,7 @@ class AppointmentRescheduleRequest(BaseModel):
 
 @app.get("/api/customers", response_model=List[CustomerResponse], tags=["Customers"])
 def get_customers(search: Optional[str] = Query(None, description="Search by partial or full customer name")):
-    """Retrieve all customers or search by name."""
+    """Retrieve all customers or search by name. PII like ID numbers are withheld for privacy."""
     if search:
         customers = db.search_customers_by_name(search)
     else:
@@ -110,15 +122,14 @@ def get_customers(search: Optional[str] = Query(None, description="Search by par
             phone=c.phone,
             email=c.email,
             dob=c.dob,
-            address=c.address,
-            id_number=c.id_number
+            address=c.address
         )
         for c in customers
     ]
 
 @app.get("/api/customers/{customer_id}", response_model=CustomerResponse, tags=["Customers"])
 def get_customer_by_id(customer_id: int):
-    """Retrieve a single customer by ID."""
+    """Retrieve a single customer by ID without exposing national ID number."""
     customer = db.get_customer_by_id(customer_id)
     if not customer:
         raise HTTPException(status_code=404, detail=f"Customer with ID {customer_id} not found.")
@@ -128,18 +139,31 @@ def get_customer_by_id(customer_id: int):
         phone=customer.phone,
         email=customer.email,
         dob=customer.dob,
-        address=customer.address,
-        id_number=customer.id_number
+        address=customer.address
     )
+
+@app.post("/api/customers/{customer_id}/verify-id", response_model=VerifyIdResponse, tags=["Customers"])
+def verify_customer_id_endpoint(customer_id: int, req: VerifyIdRequest):
+    """
+    Securely verify a customer's ID number without exposing the actual ID in API responses.
+    Prevents PII leakage while enabling chatbot and authentication layers.
+    """
+    customer = db.get_customer_by_id(customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail=f"Customer with ID {customer_id} not found.")
+    
+    clean_id = req.id_number.strip()
+    if customer.id_number and customer.id_number.strip() == clean_id:
+        return VerifyIdResponse(verified=True, message="ID verification successful.")
+    return VerifyIdResponse(verified=False, message="The ID number provided does not match our records.")
 
 @app.post("/api/customers", response_model=CustomerResponse, tags=["Customers"])
 def create_customer_endpoint(req: CustomerCreateRequest):
-    """Register a new customer with their ID number."""
-    import hashlib
+    """Register a new customer with their ID number and salted bcrypt password."""
     clean_id = req.id_number.strip()
     if len(clean_id) != 9 or not clean_id.isdigit():
         raise HTTPException(status_code=400, detail="ID number (Teudat Zehut) must be exactly 9 digits.")
-    pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
+    pw_hash = hash_password(req.password)
     try:
         c = db.create_customer(req.name, req.phone, req.email, req.dob, pw_hash, req.address, clean_id)
         return CustomerResponse(
@@ -148,8 +172,7 @@ def create_customer_endpoint(req: CustomerCreateRequest):
             phone=c.phone,
             email=c.email,
             dob=c.dob,
-            address=c.address,
-            id_number=c.id_number
+            address=c.address
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -175,8 +198,16 @@ def get_appointments(customer_id: Optional[int] = Query(None, description="Filte
     ]
 
 @app.patch("/api/appointments/{appointment_id}/cancel", tags=["Appointments"])
-def cancel_appointment_endpoint(appointment_id: int):
-    """Cancel an appointment by ID."""
+def cancel_appointment_endpoint(appointment_id: int, customer_id: Optional[int] = Query(None, description="Optional customer ID for ownership check")):
+    """Cancel an appointment by ID with existence, status, and ownership validation."""
+    app_record = db.get_appointment_by_id(appointment_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
+    if app_record.status == "Cancelled":
+        raise HTTPException(status_code=400, detail=f"Appointment {appointment_id} is already cancelled.")
+    if customer_id is not None and app_record.customer_id != customer_id:
+        raise HTTPException(status_code=403, detail="You are not authorized to cancel this appointment.")
+
     db.update_appointment_status(appointment_id, "Cancelled")
     return {"message": f"Appointment {appointment_id} cancelled successfully."}
 
@@ -184,22 +215,29 @@ def cancel_appointment_endpoint(appointment_id: int):
 def create_appointment_endpoint(req: AppointmentCreateRequest):
     """Create a new appointment for a customer."""
     try:
-        app = db.create_appointment(req.customer_id, req.service_type, req.date, req.time)
+        app_item = db.create_appointment(req.customer_id, req.service_type, req.date, req.time)
         return AppointmentResponse(
-            id=app.id,
-            customer_id=app.customer_id,
-            customer_name=app.customer_name,
-            service_type=app.service_type,
-            date=app.date,
-            time=app.time,
-            status=app.status
+            id=app_item.id,
+            customer_id=app_item.customer_id,
+            customer_name=app_item.customer_name,
+            service_type=app_item.service_type,
+            date=app_item.date,
+            time=app_item.time,
+            status=app_item.status
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.patch("/api/appointments/{appointment_id}/reschedule", tags=["Appointments"])
-def reschedule_appointment_endpoint(appointment_id: int, req: AppointmentRescheduleRequest):
-    """Reschedule an appointment to a new date and time."""
+def reschedule_appointment_endpoint(appointment_id: int, req: AppointmentRescheduleRequest, customer_id: Optional[int] = Query(None, description="Optional customer ID for ownership check")):
+    """Reschedule an appointment to a new date and time with existence, status, and ownership validation."""
+    app_record = db.get_appointment_by_id(appointment_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
+    if app_record.status == "Cancelled":
+        raise HTTPException(status_code=400, detail=f"Cannot reschedule an appointment that has already been cancelled.")
+    if customer_id is not None and app_record.customer_id != customer_id:
+        raise HTTPException(status_code=403, detail="You are not authorized to reschedule this appointment.")
     try:
         db.reschedule_appointment(appointment_id, req.new_date, req.new_time)
         return {"message": f"Appointment {appointment_id} rescheduled to {req.new_date} at {req.new_time}."}
@@ -212,11 +250,7 @@ def get_invoices(customer_id: Optional[int] = Query(None, description="Filter in
     if customer_id is not None:
         invoices = db.get_invoices_by_customer(customer_id)
     else:
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, customer_id, amount, date FROM Invoices")
-            from models import Invoice
-            invoices = [Invoice(*row) for row in cursor.fetchall()]
+        invoices = db.get_all_invoices()
     return [
         {
             "id": inv.id,
@@ -249,20 +283,24 @@ def get_leads():
 def chat_endpoint(req: ChatRequest):
     """
     Send a message to the verification & appointment chatbot.
+    Auto-generates a unique session_id if none is provided.
     """
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
-    result = chatbot.process_message(req.session_id, req.message)
+    session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else f"session_{uuid.uuid4().hex[:12]}"
+    result = chatbot.process_message(session_id, req.message)
     return result
 
 @app.post("/api/chat/reset", tags=["Chatbot"])
 def reset_chat_endpoint(req: ResetRequest):
     """
     Reset conversation state for a given session.
+    Auto-generates a unique session_id if none is provided.
     """
-    session = chatbot.reset_session(req.session_id)
+    session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else f"session_{uuid.uuid4().hex[:12]}"
+    session = chatbot.reset_session(session_id)
     return {
-        "message": f"Session {req.session_id} reset successfully.",
+        "message": f"Session {session_id} reset successfully.",
         "session": session.to_dict()
     }
 
@@ -292,5 +330,7 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    print(f"Starting Haovdim Bank Chatbot Web App at http://127.0.0.1:{port}")
-    uvicorn.run("api_server:app", host="0.0.0.0", port=port, reload=True)
+    host = os.getenv("HOST", "127.0.0.1")
+    reload_flag = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+    print(f"Starting Haovdim Bank Chatbot Web App at http://{host}:{port} (reload={reload_flag})")
+    uvicorn.run("api_server:app", host=host, port=port, reload=reload_flag)

@@ -93,7 +93,7 @@ class CustomerLoginUIFrame(ttk.Frame):
         DatePicker(self, self.dob_var, min_date=min_date, max_date=max_date, title="Select DOB")
 
     def process_login(self):
-        import hashlib
+        from auth_utils import hash_password
         email = self.email_var.get().strip()
         password = self.password_var.get().strip()
         
@@ -103,8 +103,6 @@ class CustomerLoginUIFrame(ttk.Frame):
         if not password:
             messagebox.showerror("Error", "Password is required.")
             return
-            
-        password_hash = hashlib.sha256(password.encode()).hexdigest()
             
         if self.is_new_var.get():
             confirm_pwd = self.confirm_var.get().strip()
@@ -137,6 +135,7 @@ class CustomerLoginUIFrame(ttk.Frame):
                 return
                 
             try:
+                password_hash = hash_password(password)
                 customer = self.parent.db.create_customer(name, phone, email, dob, password_hash, address, id_number)
                 messagebox.showinfo("Success", "Registration successful!")
                 from CustomerUIFrame import CustomerUIFrame
@@ -144,7 +143,7 @@ class CustomerLoginUIFrame(ttk.Frame):
             except ValueError as e:
                 messagebox.showerror("Error", str(e))
         else:
-            customer = self.parent.db.get_customer_by_auth(email, password_hash)
+            customer = self.parent.db.get_customer_by_auth(email, password)
             if customer:
                 from CustomerUIFrame import CustomerUIFrame
                 self.parent.switch_frame(CustomerUIFrame, customer)

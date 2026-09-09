@@ -1,6 +1,7 @@
 import sqlite3
 from typing import List, Optional
 from models import Customer, Appointment, Invoice, Lead
+from auth_utils import hash_password, verify_password
 
 DB_NAME = "bank_haovdim.db"
 
@@ -73,13 +74,15 @@ class DatabaseManager:
 
     # --- Customer Methods ---
 
-    def get_customer_by_auth(self, email: str, password_hash: str) -> Optional[Customer]:
+    def get_customer_by_auth(self, email: str, password_or_hash: str) -> Optional[Customer]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, name, phone, email, dob, address, id_number FROM Customers WHERE email = ? AND password = ?", (email, password_hash))
+            cursor.execute("SELECT id, name, phone, email, dob, address, id_number, password FROM Customers WHERE email = ?", (email,))
             row = cursor.fetchone()
             if row:
-                return Customer(*row)
+                stored_hash = row[7]
+                if verify_password(password_or_hash, stored_hash) or password_or_hash == stored_hash:
+                    return Customer(row[0], row[1], row[2], row[3], row[4], row[5], row[6])
         return None
 
     def create_customer(self, name: str, phone: str, email: str, dob: str, password_hash: str, address: str, id_number: Optional[str] = None) -> Customer:
@@ -200,11 +203,27 @@ class DatabaseManager:
             rows = cursor.fetchall()
             return [Appointment(*row) for row in rows]
 
-    def update_appointment_status(self, appointment_id: int, new_status: str):
+    def get_appointment_by_id(self, appointment_id: int) -> Optional[Appointment]:
+        """Retrieve an appointment by its ID."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT a.id, a.customer_id, c.name, a.service_type, a.date, a.time, a.status 
+                FROM Appointments a
+                JOIN Customers c ON a.customer_id = c.id
+                WHERE a.id = ?
+            ''', (appointment_id,))
+            row = cursor.fetchone()
+            if row:
+                return Appointment(*row)
+        return None
+
+    def update_appointment_status(self, appointment_id: int, new_status: str) -> bool:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE Appointments SET status = ? WHERE id = ?", (new_status, appointment_id))
             conn.commit()
+            return cursor.rowcount > 0
 
     def delete_appointment(self, appointment_id: int):
         with self.get_connection() as conn:
@@ -222,7 +241,7 @@ class DatabaseManager:
                 (new_date, new_time, appointment_id)
             )
             conn.commit()
-            return True
+            return cursor.rowcount > 0
 
     # --- Invoice Methods ---
 
@@ -231,6 +250,14 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("INSERT INTO Invoices (customer_id, amount, date) VALUES (?, ?, ?)", (customer_id, amount, date))
             conn.commit()
+
+    def get_all_invoices(self) -> List[Invoice]:
+        """Retrieve all invoices across all customers."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, customer_id, amount, date FROM Invoices")
+            rows = cursor.fetchall()
+            return [Invoice(*row) for row in rows]
 
     def get_invoices_by_customer(self, customer_id: int) -> List[Invoice]:
         with self.get_connection() as conn:

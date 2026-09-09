@@ -95,6 +95,129 @@
     .btn-reset:hover {
       background: #cbd5e0;
     }
+    .btn-register {
+      background: #00d4ff;
+      color: #0a2540;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-register:hover {
+      background: #00b0d6;
+    }
+    .btn-link {
+      background: none;
+      border: none;
+      color: #0066cc;
+      text-decoration: underline;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: inherit;
+      padding: 0;
+    }
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(10, 37, 64, 0.6);
+      backdrop-filter: blur(2px);
+      z-index: 999;
+      justify-content: center;
+      align-items: center;
+      padding: 16px;
+    }
+    .modal-card {
+      background: #ffffff;
+      border-radius: 12px;
+      max-width: 480px;
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      padding: 24px;
+      position: relative;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #e2e8f0;
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+    }
+    .modal-header h2 {
+      font-size: 1.2rem;
+      color: #0a2540;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 1.4rem;
+      cursor: pointer;
+      color: #718096;
+    }
+    .modal-close:hover {
+      color: #1a202c;
+    }
+    .form-group {
+      margin-bottom: 12px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #4a5568;
+      margin-bottom: 4px;
+    }
+    .form-group input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #cbd5e0;
+      border-radius: 6px;
+      font-size: 0.9rem;
+    }
+    .form-group input:focus {
+      outline: none;
+      border-color: #0066cc;
+      box-shadow: 0 0 0 2px rgba(0,102,204,0.15);
+    }
+    .form-hint {
+      font-size: 0.72rem;
+      color: #718096;
+      margin-top: 2px;
+    }
+    .form-error {
+      display: none;
+      background: #fff5f5;
+      color: #c53030;
+      border: 1px solid #feb2b2;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      margin-bottom: 12px;
+    }
+    .btn-submit-reg {
+      width: 100%;
+      background: #0066cc;
+      color: #fff;
+      border: none;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .btn-submit-reg:hover {
+      background: #0052a3;
+    }
     .main-container {
       display: flex;
       flex: 1;
@@ -201,6 +324,7 @@
     </div>
     <div class="header-status">
       <span id="state-badge" class="badge badge-state">STATE: INIT</span>
+      <button class="btn-register" onclick="openRegisterModal()">+ New Customer</button>
       <button class="btn-reset" onclick="resetSession()">↻ New Chat</button>
     </div>
   </header>
@@ -211,7 +335,8 @@
         <div class="message bot">
           <div class="bubble">
             👋 <strong>Welcome to Haovdim Bank Virtual Assistant!</strong><br><br>
-            To access your personal appointment services and secure account management, please introduce yourself with your full name (e.g., <em>"My name is [Your Name]"</em>).
+            To access your personal appointment services and secure account management, please introduce yourself with your full name.<br><br>
+            Don't have an account yet? Type <strong>"I am a new customer"</strong> or click <button class="btn-link" onclick="openRegisterModal()">Register as New Customer</button> to create an account right now!
           </div>
         </div>
       </div>
@@ -222,15 +347,230 @@
     </div>
   </div>
 
+  <!-- Registration Modal (Matches Desktop Customer Login) -->
+  <div id="register-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Customer Registration</h2>
+        <button class="modal-close" onclick="closeRegisterModal()">&times;</button>
+      </div>
+      <div id="reg-error" class="form-error"></div>
+      <form id="reg-form" onsubmit="submitRegister(event)">
+        <div class="form-group">
+          <label for="reg-name">Full Name:</label>
+          <input id="reg-name" type="text" placeholder="e.g. Ronit Bar" required />
+          <div class="form-hint">At least 2 characters</div>
+        </div>
+        <div class="form-group">
+          <label for="reg-email">Email:</label>
+          <input id="reg-email" type="email" placeholder="e.g. ronit.bar@bank.com" required />
+        </div>
+        <div class="form-group">
+          <label for="reg-password">Password:</label>
+          <input id="reg-password" type="password" placeholder="••••••••" required />
+          <div class="form-hint">Min 8 characters, at least 1 uppercase letter</div>
+        </div>
+        <div class="form-group">
+          <label for="reg-confirm">Confirm Password:</label>
+          <input id="reg-confirm" type="password" placeholder="••••••••" required />
+        </div>
+        <div class="form-group">
+          <label for="reg-id">ID Number (Teudat Zehut):</label>
+          <input id="reg-id" type="text" maxlength="9" placeholder="9 digits" required />
+          <div class="form-hint">Exactly 9 numeric digits</div>
+        </div>
+        <div class="form-group">
+          <label for="reg-phone">Phone Number:</label>
+          <input id="reg-phone" type="text" maxlength="10" placeholder="10 digits" required />
+          <div class="form-hint">Exactly 10 numeric digits</div>
+        </div>
+        <div class="form-group">
+          <label for="reg-dob">Date of Birth (Day / Month / Year):</label>
+          <div style="position: relative; display: flex; align-items: center;">
+            <input id="reg-dob" type="text" placeholder="dd / mm / yyyy" maxlength="10" autocomplete="off" required style="padding-right: 38px;" />
+            <button type="button" id="btn-dob-picker" onclick="openDatePicker()" title="Select date from calendar" style="position: absolute; right: 8px; background: none; border: none; cursor: pointer; font-size: 1.1rem; padding: 2px;">📅</button>
+            <input type="date" id="hidden-date-picker" style="position: absolute; right: 0; width: 0; height: 0; opacity: 0; pointer-events: none;" onchange="syncPickerToDob(this.value)" />
+          </div>
+          <div class="form-hint">Format: Day / Month / Year</div>
+        </div>
+        <div class="form-group">
+          <label for="reg-address">Address:</label>
+          <input id="reg-address" type="text" placeholder="e.g. Tel Aviv, Dizengoff 100" required />
+        </div>
+        <button type="submit" class="btn-submit-reg">Register Customer</button>
+      </form>
+    </div>
+  </div>
+
   <script>
     const sessionId = "session_" + Math.random().toString(36).substring(2, 9);
     const messagesContainer = document.getElementById("messages-container");
     const inputField = document.getElementById("user-input");
     const stateBadge = document.getElementById("state-badge");
+    const regModal = document.getElementById("register-modal");
+    const regError = document.getElementById("reg-error");
+    const dobInput = document.getElementById("reg-dob");
 
     inputField.addEventListener("keypress", (e) => {
       if (e.key === "Enter") sendMessage();
     });
+
+    if (dobInput) {
+      dobInput.addEventListener("input", function() {
+        let v = this.value.replace(/\D/g, "").slice(0, 8);
+        if (v.length >= 5) {
+          this.value = v.slice(0, 2) + "/" + v.slice(2, 4) + "/" + v.slice(4);
+        } else if (v.length >= 3) {
+          this.value = v.slice(0, 2) + "/" + v.slice(2);
+        } else {
+          this.value = v;
+        }
+      });
+    }
+
+    function openDatePicker() {
+      const picker = document.getElementById("hidden-date-picker");
+      if (picker) {
+        if (typeof picker.showPicker === 'function') {
+          picker.showPicker();
+        } else {
+          picker.click();
+        }
+      }
+    }
+
+    function syncPickerToDob(isoVal) {
+      if (!isoVal) return;
+      const parts = isoVal.split("-");
+      if (parts.length === 3) {
+        document.getElementById("reg-dob").value = `${parts[2]}/${parts[1]}/${parts[0]}`;
+      }
+    }
+
+    function openRegisterModal() {
+      regError.style.display = "none";
+      regModal.style.display = "flex";
+      document.getElementById("reg-name").focus();
+    }
+
+    function closeRegisterModal() {
+      regModal.style.display = "none";
+    }
+
+    async function submitRegister(e) {
+      e.preventDefault();
+      regError.style.display = "none";
+
+      const name = document.getElementById("reg-name").value.trim();
+      const email = document.getElementById("reg-email").value.trim();
+      const password = document.getElementById("reg-password").value;
+      const confirm = document.getElementById("reg-confirm").value;
+      const idNumber = document.getElementById("reg-id").value.trim();
+      const phone = document.getElementById("reg-phone").value.trim();
+      const dobRaw = document.getElementById("reg-dob").value.trim();
+      const address = document.getElementById("reg-address").value.trim();
+
+      // Client-side validations identical to CustomerLoginUIFrame
+      if (name.length < 2) {
+        showRegError("Name must be at least 2 letters long.");
+        return;
+      }
+      if (!email || !email.includes("@")) {
+        showRegError("A valid email containing '@' is required.");
+        return;
+      }
+      if (password !== confirm) {
+        showRegError("Passwords do not match.");
+        return;
+      }
+      if (password.length < 8 || !/[A-Z]/.test(password)) {
+        showRegError("Password must be at least 8 characters long and contain at least 1 uppercase letter.");
+        return;
+      }
+      if (idNumber.length !== 9 || !/^\d{9}$/.test(idNumber)) {
+        showRegError("ID number (Teudat Zehut) must be exactly 9 digits.");
+        return;
+      }
+      if (phone.length !== 10 || !/^\d{10}$/.test(phone)) {
+        showRegError("Phone number must be exactly 10 digits.");
+        return;
+      }
+
+      // Validate Day / Month / Year
+      let formattedDob = "";
+      const dobParts = dobRaw.split(/[\/\.\-]/);
+      if (dobParts.length === 3) {
+        if (dobParts[0].length === 4) {
+          // YYYY-MM-DD
+          formattedDob = `${dobParts[0]}-${dobParts[1].padStart(2, '0')}-${dobParts[2].padStart(2, '0')}`;
+        } else {
+          // Day / Month / Year -> convert to standard YYYY-MM-DD for storage
+          const day = parseInt(dobParts[0], 10);
+          const month = parseInt(dobParts[1], 10);
+          const year = parseInt(dobParts[2], 10);
+          const currYear = new Date().getFullYear();
+          if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 1900 && year <= currYear) {
+            formattedDob = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          }
+        }
+      }
+
+      if (!formattedDob) {
+        showRegError("Please provide a valid Date of Birth in Day / Month / Year format (dd/mm/yyyy).");
+        return;
+      }
+      if (!address) {
+        showRegError("Address is required.");
+        return;
+      }
+
+      try {
+        const resp = await fetch("/api/customers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: name,
+            phone: phone,
+            email: email,
+            password: password,
+            dob: formattedDob,
+            address: address,
+            id_number: idNumber
+          })
+        });
+
+        if (!resp.ok) {
+          const errData = await resp.json();
+          showRegError(errData.detail || "Registration failed.");
+          return;
+        }
+
+        const newCust = await resp.json();
+        closeRegisterModal();
+        document.getElementById("reg-form").reset();
+
+        appendMessage("user", `Register account for ${newCust.name}`);
+        appendMessage("bot", `🎉 <strong>Registration Successful!</strong> Welcome to Haovdim Bank, <strong>${newCust.name}</strong>.<br><br>Your account is ready and verified! Let me connect you with our virtual assistant services.`);
+
+        // Now auto-authenticate in chatbot session
+        const chatResp = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: `My name is ${newCust.name}`, session_id: sessionId })
+        });
+        const chatData = await chatResp.json();
+        appendMessage("bot", chatData.reply);
+        updateStateBadge(chatData.session.state);
+
+      } catch (err) {
+        showRegError("Network error while connecting to bank API. Please check server.");
+      }
+    }
+
+    function showRegError(msg) {
+      regError.textContent = msg;
+      regError.style.display = "block";
+    }
 
     function appendMessage(role, text) {
       const msgDiv = document.createElement("div");
@@ -280,7 +620,7 @@
           body: JSON.stringify({ session_id: sessionId })
         });
         messagesContainer.innerHTML = "";
-        appendMessage("bot", "👋 <strong>Session reset.</strong> Welcome to Haovdim Bank! To begin, please introduce yourself with your full name.");
+        appendMessage("bot", "👋 <strong>Session reset.</strong> Welcome to Haovdim Bank! To begin, please introduce yourself with your full name, or click <button class=\"btn-link\" onclick=\"openRegisterModal()\">Register New Customer</button>.");
         updateStateBadge("INIT");
         inputField.value = "";
         inputField.focus();

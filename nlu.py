@@ -117,14 +117,19 @@ class NLULayer:
             "intent": "general"
         }
 
-        # 1. ID Number extraction (sequence of 5 to 10 digits)
+        # 1. Registration intent (e.g. "I am a new customer", "register", "create an account")
+        lower_msg = msg.lower()
+        if any(term in lower_msg for term in ["new customer", "register", "sign up", "create account", "create user", "new user", "open account"]):
+            result["intent"] = "register"
+            return result
+
+        # 2. ID Number extraction (sequence of 5 to 10 digits)
         id_match = re.search(r'\b\d{5,10}\b', msg)
         if id_match:
             result["id_number"] = id_match.group(0)
             result["intent"] = "provide_id"
 
-        # 2. Confirmation (yes/no)
-        lower_msg = msg.lower()
+        # 3. Confirmation (yes/no)
         if lower_msg in ["yes", "yeah", "yep", "correct", "that's me", "thats me", "true", "sure", "right"]:
             result["confirmation"] = True
             result["intent"] = "confirm_name"
