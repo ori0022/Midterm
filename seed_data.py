@@ -26,11 +26,11 @@ def seed_database(db: Optional[DatabaseManager] = None):
     pw_hash = hash_password("password123")
     
     # 1. Customers (with 9-digit Teudat Zehut and bcrypt password hashes)
-    c1 = db.create_customer("Dana Shavit", "0541112233", "dana.shavit@bank.com", "1995-05-12", pw_hash, "Tel Aviv, Rothschild 45", "123456789")
-    c2 = db.create_customer("David Cohen", "0523334455", "david.cohen@bank.com", "1988-11-20", pw_hash, "Jerusalem, Jaffa 12", "987654321")
-    c3 = db.create_customer("David Levi", "0504445566", "david.levi@bank.com", "1990-03-15", pw_hash, "Haifa, Herzl 78", "555666777")
-    c4 = db.create_customer("Tamar Ben-David", "0537778899", "tamar.bd@bank.com", "1984-02-28", pw_hash, "Rishon LeZion, Jabotinsky 5", "444333222")
-    c5 = db.create_customer("Yossi Mizrahi", "0589990011", "yossi.m@bank.com", "1978-06-22", pw_hash, "Herzliya, Sokolov 20", "222333444")
+    c1 = db.create_customer("Dana Shavit", "0541112233", "dana.shavit@bank.com", "1995-05-12", pw_hash, "Tel Aviv, Rothschild 45", "123456782")
+    c2 = db.create_customer("David Cohen", "0523334455", "david.cohen@bank.com", "1988-11-20", pw_hash, "Jerusalem, Jaffa 12", "987654324")
+    c3 = db.create_customer("David Levi", "0504445566", "david.levi@bank.com", "1990-03-15", pw_hash, "Haifa, Herzl 78", "555666775")
+    c4 = db.create_customer("Tamar Ben-David", "0537778899", "tamar.bd@bank.com", "1984-02-28", pw_hash, "Rishon LeZion, Jabotinsky 5", "444333223")
+    c5 = db.create_customer("Yossi Mizrahi", "0589990011", "yossi.m@bank.com", "1978-06-22", pw_hash, "Herzliya, Sokolov 20", "222333445")
     
     with db.get_connection() as conn:
         cursor = conn.cursor()

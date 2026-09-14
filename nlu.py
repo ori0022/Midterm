@@ -106,8 +106,8 @@ class NLULayer:
             "intent": data.get("intent", "general")
         }
 
-    def _extract_with_fallback(self, message: str, current_state: str) -> Dict[str, Any]:
-        """Robust rule-based parser for offline/test reliability."""
+    def _extract_with_fallback(self, message: str, current_state: str = "INIT") -> Dict[str, Any]:
+        """Robust rule-based parser for offline/test reliability with Hebrew and complex entity support."""
         msg = message.strip()
         result: Dict[str, Any] = {
             "name": None,
@@ -117,27 +117,36 @@ class NLULayer:
             "intent": "general"
         }
 
-        # 1. Registration intent (e.g. "I am a new customer", "register", "create an account")
         lower_msg = msg.lower()
-        if any(term in lower_msg for term in ["new customer", "register", "sign up", "create account", "create user", "new user", "open account"]):
+
+        # 1. Registration intent (English and Hebrew)
+        reg_keywords = [
+            "new customer", "register", "sign up", "create account", "create user", "new user", "open account",
+            "לקוח חדש", "הרשמה", "להירשם", "פתח חשבון", "פתיחת חשבון", "משתמש חדש", "חשבון חדש"
+        ]
+        if any(term in lower_msg for term in reg_keywords):
             result["intent"] = "register"
             return result
 
-        # 2. ID Number extraction (sequence of exactly 9 digits for Israeli ID)
-        id_match = re.search(r'\b\d{9}\b', msg)
+        # 2. ID Number extraction (9 digits with optional hyphens/spaces for Israeli ID)
+        id_match = re.search(r'(?<!\d)(?:\d[\s-]*){9}(?!\d)', msg)
         if id_match:
-            result["id_number"] = id_match.group(0)
-            result["intent"] = "provide_id"
+            clean_digits = re.sub(r'[\s-]', '', id_match.group(0))
+            if len(clean_digits) == 9 and clean_digits.isdigit():
+                result["id_number"] = clean_digits
+                result["intent"] = "provide_id"
 
-        # 3. Confirmation (yes/no)
-        if lower_msg in ["yes", "yeah", "yep", "correct", "that's me", "thats me", "true", "sure", "right"]:
-            result["confirmation"] = True
-            result["intent"] = "confirm_name"
-        elif lower_msg in ["no", "nope", "not me", "wrong", "false"]:
+        # 3. Confirmation and Denial (English and Hebrew)
+        # 3. Confirmation and Denial (English and Hebrew)
+        tokens = re.findall(r'[\w\u0590-\u05FF]+', lower_msg)
+        if any(term in tokens for term in ["no", "nope", "wrong", "false", "לא", "טעות", "שגוי", "שלילי"]) or any(phrase in lower_msg for phrase in ["not me", "לא נכון", "לא אני"]):
             result["confirmation"] = False
             result["intent"] = "confirm_name"
+        elif any(term in tokens for term in ["yes", "yeah", "yep", "correct", "true", "sure", "right", "exactly", "כן", "נכון", "אכן", "מדויק", "בדיוק", "חיובי", "אמת"]) or any(phrase in lower_msg for phrase in ["that's me", "thats me", "זה אני"]):
+            result["confirmation"] = True
+            result["intent"] = "confirm_name"
 
-        # 3. Date extraction (e.g. 18.01.2027, 18/01/2027, 2027-01-18)
+        # 4. Date extraction (e.g. 18.01.2027, 18/01/2027, 2027-01-18)
         date_match = re.search(r'(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})', msg)
         if date_match:
             d, m, y = date_match.groups()
@@ -148,30 +157,53 @@ class NLULayer:
                 y, m, d = iso_match.groups()
                 result["claimed_date"] = f"{y}-{int(m):02d}-{int(d):02d}"
 
-        # 4. Name extraction
-        # e.g., "My name is Dana and I have an appointment", "I am Dana Shavit", "David"
-        stop_words = r"(?:\s+(?:and|i|have|has|an|a|with|for|on|at|my|appointment|please|to|the))\b"
-        # Match phrase after "my name is", "i am", etc.
-        m_intro = re.search(r"(?:my name is|i am|i'm|name is|this is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)", msg, re.IGNORECASE)
-        if m_intro:
+        # 5. Name extraction (Complex names: hyphens, honorific titles, Hebrew & English)
+        LETTERS = r"[A-Za-z\u0590-\u05FF]"
+        TOKEN = rf"{LETTERS}+(?:[-]{LETTERS}+)?"
+        FULL_NAME = rf"{TOKEN}(?:\s+{TOKEN}){{0,3}}"
+        TITLES = r"(?:(?:Dr|Prof|Mr|Mrs|Ms)\.?|ד\"ר|דר'|דר|פרופ'?|מר|גב'|גברת)"
+        INTRO_PREFIX = r"(?:my name is|i am|i'm|name is|this is|שמי הוא|השם שלי הוא|השם שלי|שמי|אני|מדבר|מדברת|זה|זאת|קוראים לי)"
+        stop_words = r"(?:\s+(?:and|i|have|has|an|a|with|for|on|at|my|appointment|please|to|the|ויש|יש|לי|תור|פגישה|בבקשה|אצל))\b"
+        blacklist = [
+            "yes", "no", "hello", "hi", "hey", "help", "cancel", "thanks", "thank you",
+            "כן", "לא", "שלום", "היי", "תודה", "תור", "עזרה", "ביטול", "לבטל", "לשנות", "להזיז", "לקבוע",
+            "רוצה", "מעוניין", "מעוניינת", "מבקש", "מבקשת",
+            "מה", "נשמע", "קורה", "המצב", "הולך", "אח", "יקר", "אחי", "גבר", "חבר",
+            "בוקר", "טוב", "ערב", "צהריים", "לילה", "אהלן", "הלו", "איך", "איתך"
+        ]
+
+        # Filter out common greetings from being treated as names
+        greeting_patterns = [
+            r"מה נשמע", r"מה קורה", r"מה המצב", r"מה הולך", r"איך הולך",
+            r"בוקר טוב", r"ערב טוב", r"צהריים טובים", r"לילה טוב", r"אח יקר", r"מה איתך"
+        ]
+        is_greeting_phrase = any(re.search(pat, lower_msg) for pat in greeting_patterns)
+
+        m_intro = re.search(rf"(?:{INTRO_PREFIX}\s+)(?:{TITLES}\s+)?({FULL_NAME})", msg, re.IGNORECASE)
+        if m_intro and not is_greeting_phrase:
             raw_name = m_intro.group(1).strip()
-            # Split if a stop word was included
             cleaned = re.split(stop_words, raw_name, flags=re.IGNORECASE)[0].strip()
-            if cleaned.lower() not in ["yes", "no", "hello", "hi", "hey", "appointment", "help"]:
+            words_in_name = [w.lower() for w in cleaned.split()]
+            if not any(w in blacklist for w in words_in_name) and len(cleaned) >= 2:
                 result["name"] = cleaned
                 if result["intent"] == "general":
                     result["intent"] = "check_appointment"
-        elif not result["id_number"] and not result["claimed_date"] and result["confirmation"] is None:
-            # Standalone name match if whole message is 1-3 words
-            m_standalone = re.match(r"^([A-Za-z]+(?:\s+[A-Za-z]+)?)$", msg)
+        elif not result["id_number"] and not result["claimed_date"] and result["confirmation"] is None and not is_greeting_phrase:
+            m_standalone = re.match(rf"^(?:{TITLES}\s+)?({FULL_NAME})$", msg, re.IGNORECASE)
             if m_standalone:
                 word = m_standalone.group(1).strip()
-                if word.lower() not in ["yes", "no", "hello", "hi", "hey", "help", "cancel", "thanks", "thank you"]:
+                words_in_name = [w.lower() for w in word.split()]
+                if not any(w in blacklist for w in words_in_name) and len(word) >= 2:
                     result["name"] = word
 
-        # Check for cancel intent
-        if "cancel" in lower_msg:
+        # 6. Action Intent extraction (cancellation, reschedule, etc.)
+        cancel_keywords = ["cancel", "ביטול", "לבטל", "בטל", "מחיקת", "למחוק"]
+        if any(term in lower_msg for term in cancel_keywords):
             result["intent"] = "cancel_appointment"
+
+        resched_keywords = ["reschedule", "move appointment", "change appointment", "move", "להזיז", "שינוי", "לשנות", "הזזה", "לדחות"]
+        if any(term in lower_msg for term in resched_keywords):
+            result["intent"] = "reschedule_appointment"
 
         return result
 
@@ -181,10 +213,12 @@ class NLULayer:
         claimed_date: Optional[str],
         actual_date: str,
         actual_time: str,
-        service_type: str
+        service_type: str,
+        language: str = "en"
     ) -> str:
         """
         Formulate natural-language response highlighting discrepancy if present.
+        Supports both English and Hebrew based on language.
         """
         # Convert dates to standard display format DD.MM.YYYY
         def to_display_date(dt_str: str) -> str:
@@ -202,11 +236,22 @@ class NLULayer:
 
         has_discrepancy = display_claimed_date and (display_claimed_date != display_actual_date)
 
+        service_he_map = {
+            "New Account Opening": "פתיחת חשבון חדש",
+            "Mortgage Consultation": "ייעוץ משכנתאות",
+            "Investment Planning": "תכנון השקעות",
+            "Personal Loan Application": "בקשת הלוואה אישית",
+            "Account Review": "בדיקת חשבון"
+        }
+        service_display = service_he_map.get(service_type, service_type) if language == "he" else service_type
+
         # If Gemini is available, use it to formulate response
         if self.client:
             try:
+                lang_rule = "You MUST reply in Hebrew." if language == "he" else "You MUST reply in English."
                 system_prompt = (
-                    "You are the virtual assistant of Haovdim Bank. You have successfully verified the customer's identity.\n"
+                    f"You are the virtual assistant of Haovdim Bank. You have successfully verified the customer's identity.\n"
+                    f"{lang_rule}\n"
                     "Formulate a polite, clear, natural response to the customer informing them of their closest appointment details (e.g. 'Your closest appointment is scheduled on...').\n"
                     "If the user claimed a different date, you MUST clearly point out the discrepancy and correct them politely.\n"
                     "Keep the response professional, concise, and friendly."
@@ -216,8 +261,8 @@ class NLULayer:
                     f"Claimed Date: {display_claimed_date or 'Not specified'}\n"
                     f"Actual Date: {display_actual_date}\n"
                     f"Actual Time: {actual_time}\n"
-                    f"Service Type: {service_type}\n"
-                    f"Discrepancy: {'YES, claimed ' + display_claimed_date + ' but actual is ' + display_actual_date if has_discrepancy else 'NO'}"
+                    f"Service Type: {service_display}\n"
+                    f"Discrepancy: {'YES, claimed ' + str(display_claimed_date) + ' but actual is ' + display_actual_date if has_discrepancy else 'NO'}"
                 )
                 from google.genai import types
                 resp = self.client.models.generate_content(
@@ -234,23 +279,37 @@ class NLULayer:
                 print(f"[NLU] Gemini response generation failed, using standard template: {e}")
 
         # Deterministic standard template matching the project specification
-        if has_discrepancy:
-            return (
-                f"I found you! Please note: your actual appointment is on "
-                f"{display_actual_date} at {actual_time} for {service_type} "
-                f"(not {display_claimed_date} as you stated)."
-            )
+        if language == "he":
+            if has_discrepancy:
+                return (
+                    f"מצאתי אותך! שים/שימי לב: התור שלך בפועל נקבע לתאריך "
+                    f"{display_actual_date} בשעה {actual_time} עבור {service_display} "
+                    f"(ולא ב-{display_claimed_date} כפי שציינת)."
+                )
+            else:
+                return (
+                    f"מצאתי אותך! התור הקרוב ביותר שלך נקבע לתאריך "
+                    f"{display_actual_date} בשעה {actual_time} עבור {service_display}."
+                )
         else:
-            return (
-                f"I found you! Your closest appointment is scheduled on "
-                f"{display_actual_date} at {actual_time} for {service_type}."
-            )
+            if has_discrepancy:
+                return (
+                    f"I found you! Please note: your actual appointment is on "
+                    f"{display_actual_date} at {actual_time} for {service_type} "
+                    f"(not {display_claimed_date} as you stated)."
+                )
+            else:
+                return (
+                    f"I found you! Your closest appointment is scheduled on "
+                    f"{display_actual_date} at {actual_time} for {service_type}."
+                )
 
     def generate_conversational_reply(
         self,
         customer_name: str,
         user_message: str,
-        open_appointments: List[Dict[str, Any]]
+        open_appointments: List[Dict[str, Any]],
+        language: str = "en"
     ) -> Optional[str]:
         """Generate a natural conversational response using Gemini for verified customers."""
         if not self.client:
@@ -260,8 +319,10 @@ class NLULayer:
                 ", ".join([f"{a['service_type']} on {a['date']} at {a['time']}" for a in open_appointments])
                 if open_appointments else "None"
             )
+            lang_rule = "You MUST reply in natural, polite Hebrew." if language == "he" else "Reply in English."
             system_prompt = (
                 f"You are the virtual assistant of Haovdim Bank talking to verified customer {customer_name}.\n"
+                f"{lang_rule}\n"
                 f"Customer's open appointments: {apps_summary}\n"
                 "Respond helpfully, politely, and concisely to the customer.\n"
                 "If they ask to cancel an appointment, answer whether it can be cancelled.\n"

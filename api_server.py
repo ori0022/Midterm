@@ -1,14 +1,15 @@
 import os
 import uuid
 import secrets
-from typing import Optional, List
+import time
+from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Depends, Header, Security
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from auth_utils import hash_password
+from auth_utils import hash_password, create_access_token, verify_access_token, validate_israeli_id
 
 def _load_env():
     try:
@@ -53,11 +54,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-db = DatabaseManager()
-chatbot = ChatbotService()
-
 # --- Authentication & Authorization Layer ---
-BANK_API_KEY = os.getenv("BANK_API_KEY", os.getenv("INTERNAL_API_KEY", "haovdim_bank_internal_secret_key_2026"))
+# Load configured API key or generate a secure random key on startup (no static hardcoded default)
+_configured_key = os.getenv("BANK_API_KEY", os.getenv("INTERNAL_API_KEY"))
+if _configured_key and _configured_key.strip():
+    BANK_API_KEY = _configured_key.strip()
+else:
+    BANK_API_KEY = secrets.token_urlsafe(32)
+
+os.environ["BANK_API_KEY"] = BANK_API_KEY
+
+from api_client import BankApiClient
+db = DatabaseManager()
+api_client = BankApiClient(base_url="http://127.0.0.1:8000", api_key=BANK_API_KEY)
+chatbot = ChatbotService(api_client=api_client, db_manager=db)
+
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def verify_api_key(
@@ -83,7 +94,50 @@ def verify_api_key(
         )
     return token
 
+def get_current_user_or_staff(
+    x_api_key: Optional[str] = Security(api_key_header),
+    authorization: Optional[str] = Header(None)
+) -> Dict[str, Any]:
+    """
+    Validates either a Staff API Key or a signed Customer JWT Bearer token.
+    Enforces authentication to prevent IDOR and unauthorized data manipulation.
+    """
+    token = x_api_key
+    if not token and authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization[7:].strip()
+        else:
+            token = authorization.strip()
+
+    # 1. Staff API key match
+    if token and token == BANK_API_KEY:
+        return {"role": "staff"}
+
+    # 2. Signed customer JWT token
+    if token:
+        payload = verify_access_token(token)
+        if payload and "sub" in payload:
+            return {
+                "role": payload.get("role", "customer"),
+                "customer_id": int(payload["sub"])
+            }
+
+    raise HTTPException(
+        status_code=401,
+        detail="Unauthorized: Valid Bearer JWT token or Staff API Key is required."
+    )
+
 # --- Pydantic Models for API Requests / Responses ---
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    customer_id: int
+    customer_name: str
 
 class ChatRequest(BaseModel):
     message: str
@@ -135,9 +189,22 @@ class AppointmentRescheduleRequest(BaseModel):
     new_date: str
     new_time: str
 
-# --- Entity REST API Endpoints ---
+# --- Authentication Endpoints ---
 
-# --- Entity REST API Endpoints (Protected by Internal API Key) ---
+@app.post("/api/auth/login", response_model=LoginResponse, tags=["Authentication"])
+def login_endpoint(req: LoginRequest):
+    """Authenticate customer with email and password, returning a signed JWT access token."""
+    customer = db.get_customer_by_auth(req.email.strip(), req.password)
+    if not customer:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    token = create_access_token({"sub": customer.id, "role": "customer"})
+    return LoginResponse(
+        access_token=token,
+        customer_id=customer.id,
+        customer_name=customer.name
+    )
+
+# --- Entity REST API Endpoints ---
 
 @app.get("/api/customers", response_model=List[CustomerResponse], tags=["Customers"], dependencies=[Depends(verify_api_key)])
 def get_customers(search: Optional[str] = Query(None, description="Search by partial or full customer name")):
@@ -158,42 +225,75 @@ def get_customers(search: Optional[str] = Query(None, description="Search by par
         for c in customers
     ]
 
-@app.get("/api/customers/{customer_id}", response_model=CustomerResponse, tags=["Customers"], dependencies=[Depends(verify_api_key)])
-def get_customer_by_id(customer_id: int):
-    """Retrieve a single customer by ID without exposing national ID number."""
+@app.get("/api/customers/{customer_id}", response_model=CustomerResponse, tags=["Customers"])
+def get_customer_by_id(
+    customer_id: int,
+    auth_user: Dict[str, Any] = Depends(get_current_user_or_staff)
+):
+    """
+    Retrieve a single customer by ID.
+    PII (Date of Birth and Address) are strictly protected and withheld
+    unless the caller is verified bank staff or the customer accessing their own record.
+    """
     customer = db.get_customer_by_id(customer_id)
     if not customer:
         raise HTTPException(status_code=404, detail=f"Customer with ID {customer_id} not found.")
+
+    allow_pii = (auth_user["role"] == "staff") or (auth_user.get("customer_id") == customer_id)
     return CustomerResponse(
         id=customer.id,
         name=customer.name,
         phone=customer.phone,
         email=customer.email,
-        dob=customer.dob,
-        address=customer.address
+        dob=customer.dob if allow_pii else None,
+        address=customer.address if allow_pii else None
     )
 
 @app.post("/api/customers/{customer_id}/verify-id", response_model=VerifyIdResponse, tags=["Customers"], dependencies=[Depends(verify_api_key)])
 def verify_customer_id_endpoint(customer_id: int, req: VerifyIdRequest):
     """
     Securely verify a customer's ID number without exposing the actual ID in API responses.
-    Prevents PII leakage while enabling chatbot and authentication layers.
+    Enforces persistent database-backed brute force lockout (max 3 failed attempts).
     """
     customer = db.get_customer_by_id(customer_id)
     if not customer:
         raise HTTPException(status_code=404, detail=f"Customer with ID {customer_id} not found.")
-    
-    clean_id = req.id_number.strip()
-    if customer.id_number and customer.id_number.strip() == clean_id:
+
+    failed_attempts, locked_until = db.get_customer_lockout(customer_id)
+    if locked_until > 0 and time.time() < locked_until:
+        raise HTTPException(
+            status_code=423,
+            detail="Account is locked due to exceeding maximum verification attempts. Please contact bank support."
+        )
+
+    clean_id = req.id_number.strip().replace("-", "").replace(" ", "")
+    actual_id = customer.id_number.strip().replace("-", "").replace(" ", "") if customer.id_number else ""
+
+    if actual_id and actual_id == clean_id:
+        db.clear_customer_lockout(customer_id)
         return VerifyIdResponse(verified=True, message="ID verification successful.")
-    return VerifyIdResponse(verified=False, message="The ID number provided does not match our records.")
+    else:
+        fails, is_locked, lock_time = db.record_failed_verification_attempt(customer_id)
+        if is_locked:
+            raise HTTPException(
+                status_code=423,
+                detail="Verification failed. Maximum of 3 attempts exceeded. Customer account has been locked for 15 minutes."
+            )
+        remaining = max(0, 3 - fails)
+        return VerifyIdResponse(
+            verified=False,
+            message=f"The ID number provided does not match our records. You have {remaining} attempt{'s' if remaining > 1 else ''} remaining."
+        )
 
 @app.post("/api/customers", response_model=CustomerResponse, tags=["Customers"])
 def create_customer_endpoint(req: CustomerCreateRequest):
     """Register a new customer with their ID number and salted bcrypt password."""
-    clean_id = req.id_number.strip()
-    if len(clean_id) != 9 or not clean_id.isdigit():
-        raise HTTPException(status_code=400, detail="ID number (Teudat Zehut) must be exactly 9 digits.")
+    clean_id = req.id_number.strip().replace("-", "").replace(" ", "")
+    if not validate_israeli_id(clean_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Israeli ID number (Teudat Zehut): must be 9 digits and pass the Luhn Modulo 10 check digit verification."
+        )
     pw_hash = hash_password(req.password)
     try:
         c = db.create_customer(req.name, req.phone, req.email, req.dob, pw_hash, req.address, clean_id)
@@ -228,14 +328,28 @@ def get_appointments(customer_id: Optional[int] = Query(None, description="Filte
         for a in appointments
     ]
 
-@app.patch("/api/appointments/{appointment_id}/cancel", tags=["Appointments"], dependencies=[Depends(verify_api_key)])
-def cancel_appointment_endpoint(appointment_id: int, customer_id: int = Query(..., description="Mandatory customer ID for ownership check")):
-    """Cancel an appointment by ID with existence, status, and mandatory ownership validation."""
+@app.patch("/api/appointments/{appointment_id}/cancel", tags=["Appointments"])
+def cancel_appointment_endpoint(
+    appointment_id: int,
+    auth_user: Dict[str, Any] = Depends(get_current_user_or_staff),
+    customer_id: Optional[int] = Query(None, description="Customer ID for ownership check")
+):
+    """Cancel an appointment by ID with verified ownership validation (prevents IDOR)."""
     app_record = db.get_appointment_by_id(appointment_id)
     if not app_record:
         raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
-    if app_record.customer_id != customer_id:
-        raise HTTPException(status_code=403, detail="You are not authorized to cancel this appointment.")
+
+    if auth_user["role"] == "customer":
+        if app_record.customer_id != auth_user["customer_id"]:
+            raise HTTPException(status_code=403, detail="Forbidden: You are not authorized to cancel this appointment.")
+        if customer_id is not None and customer_id != auth_user["customer_id"]:
+            raise HTTPException(status_code=403, detail="Forbidden: customer_id parameter does not match authenticated token.")
+    elif auth_user["role"] == "staff":
+        if customer_id is None:
+            raise HTTPException(status_code=422, detail="Field 'customer_id' query parameter is required.")
+        if app_record.customer_id != customer_id:
+            raise HTTPException(status_code=403, detail="You are not authorized to cancel this appointment.")
+
     if app_record.status == "Cancelled":
         raise HTTPException(status_code=400, detail=f"Appointment {appointment_id} is already cancelled.")
 
@@ -259,16 +373,32 @@ def create_appointment_endpoint(req: AppointmentCreateRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.patch("/api/appointments/{appointment_id}/reschedule", tags=["Appointments"], dependencies=[Depends(verify_api_key)])
-def reschedule_appointment_endpoint(appointment_id: int, req: AppointmentRescheduleRequest, customer_id: int = Query(..., description="Mandatory customer ID for ownership check")):
-    """Reschedule an appointment to a new date and time with existence, status, and mandatory ownership validation."""
+@app.patch("/api/appointments/{appointment_id}/reschedule", tags=["Appointments"])
+def reschedule_appointment_endpoint(
+    appointment_id: int,
+    req: AppointmentRescheduleRequest,
+    auth_user: Dict[str, Any] = Depends(get_current_user_or_staff),
+    customer_id: Optional[int] = Query(None, description="Customer ID for ownership check")
+):
+    """Reschedule an appointment to a new date and time with verified ownership validation (prevents IDOR)."""
     app_record = db.get_appointment_by_id(appointment_id)
     if not app_record:
         raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
-    if app_record.customer_id != customer_id:
-        raise HTTPException(status_code=403, detail="You are not authorized to reschedule this appointment.")
+
+    if auth_user["role"] == "customer":
+        if app_record.customer_id != auth_user["customer_id"]:
+            raise HTTPException(status_code=403, detail="Forbidden: You are not authorized to reschedule this appointment.")
+        if customer_id is not None and customer_id != auth_user["customer_id"]:
+            raise HTTPException(status_code=403, detail="Forbidden: customer_id parameter does not match authenticated token.")
+    elif auth_user["role"] == "staff":
+        if customer_id is None:
+            raise HTTPException(status_code=422, detail="Field 'customer_id' query parameter is required.")
+        if app_record.customer_id != customer_id:
+            raise HTTPException(status_code=403, detail="You are not authorized to reschedule this appointment.")
+
     if app_record.status == "Cancelled":
         raise HTTPException(status_code=400, detail="Cannot reschedule an appointment that has already been cancelled.")
+
     try:
         db.reschedule_appointment(appointment_id, req.new_date, req.new_time)
         return {"message": f"Appointment {appointment_id} rescheduled to {req.new_date} at {req.new_time}."}

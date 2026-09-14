@@ -121,8 +121,9 @@ class CustomerLoginUIFrame(ttk.Frame):
             if len(name) < 2:
                 messagebox.showerror("Error", "Name must be at least 2 letters long.")
                 return
-            if len(id_number) != 9 or not id_number.isdigit():
-                messagebox.showerror("Error", "ID number (Teudat Zehut) must be exactly 9 digits.")
+            from auth_utils import validate_israeli_id
+            if not validate_israeli_id(id_number):
+                messagebox.showerror("Error", "ID number (Teudat Zehut) must be 9 digits and pass Luhn Modulo 10 check digit verification.")
                 return
             if len(phone) != 10 or not phone.isdigit():
                 messagebox.showerror("Error", "Phone number must be exactly 10 digits.")

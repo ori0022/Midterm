@@ -324,7 +324,7 @@ class AdminUIFrame(ttk.Frame):
         ttk.Entry(top, textvariable=id_num_var).grid(row=4, column=1, padx=5, pady=5)
 
         def save():
-            import hashlib
+            from auth_utils import hash_password, validate_israeli_id
             em = em_var.get().strip()
             pw = pw_var.get().strip()
             dob = dob_var.get().strip()
@@ -334,8 +334,12 @@ class AdminUIFrame(ttk.Frame):
             if not em or "@" not in em or not pw or not dob or not ad:
                 messagebox.showerror("Error", "All fields are required and valid.")
                 return
+
+            if id_num and not validate_israeli_id(id_num):
+                messagebox.showerror("Error", "ID number (Teudat Zehut) must be 9 digits and pass Luhn Modulo 10 check digit verification.")
+                return
                 
-            pwd_hash = hashlib.sha256(pw.encode()).hexdigest()
+            pwd_hash = hash_password(pw)
             try:
                 self.parent.db.convert_lead(l_id, em, pwd_hash, dob, ad, id_num or None)
                 messagebox.showinfo("Success", "Lead converted to Customer!")

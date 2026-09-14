@@ -6,6 +6,9 @@ if hasattr(sys.stdout, 'reconfigure'):
 from verification import ChatbotService, ConversationState
 from database import DatabaseManager
 from api_client import BankApiClient
+import auth_utils
+import api_server
+from fastapi.testclient import TestClient
 
 TEST_DB = "test_scenarios_isolated.db"
 
@@ -15,12 +18,12 @@ def print_separator(title: str):
     print("="*70)
 
 def seed_isolated_test_db(db: DatabaseManager):
-    pw_hash = hashlib.sha256("password123".encode()).hexdigest()
-    c1 = db.create_customer("Dana Shavit", "0541112233", "dana.shavit@bank.com", "1995-05-12", pw_hash, "Tel Aviv", "123456789")
-    c2 = db.create_customer("David Cohen", "0523334455", "david.cohen@bank.com", "1988-11-20", pw_hash, "Jerusalem", "987654321")
-    c3 = db.create_customer("David Levi", "0504445566", "david.levi@bank.com", "1990-03-15", pw_hash, "Haifa", "555666777")
-    c4 = db.create_customer("Tamar Ben-David", "0537778899", "tamar.bd@bank.com", "1984-02-28", pw_hash, "Rishon LeZion", "444333222")
-    c5 = db.create_customer("Yossi Mizrahi", "0589990011", "yossi.m@bank.com", "1978-06-22", pw_hash, "Herzliya", "222333444")
+    pw_hash = auth_utils.hash_password("password123")
+    c1 = db.create_customer("Dana Shavit", "0541112233", "dana.shavit@bank.com", "1995-05-12", pw_hash, "Tel Aviv", "123456782")
+    c2 = db.create_customer("David Cohen", "0523334455", "david.cohen@bank.com", "1988-11-20", pw_hash, "Jerusalem", "987654324")
+    c3 = db.create_customer("David Levi", "0504445566", "david.levi@bank.com", "1990-03-15", pw_hash, "Haifa", "555666775")
+    c4 = db.create_customer("Tamar Ben-David", "0537778899", "tamar.bd@bank.com", "1984-02-28", pw_hash, "Rishon LeZion", "444333223")
+    c5 = db.create_customer("Yossi Mizrahi", "0589990011", "yossi.m@bank.com", "1978-06-22", pw_hash, "Herzliya", "222333445")
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -47,14 +50,18 @@ def run_all_tests():
 
     db = DatabaseManager(db_name=TEST_DB)
     seed_isolated_test_db(db)
-    api = BankApiClient(db_manager=db)
-    svc = ChatbotService(api_client=api)
+    api_server.db = db
+    test_client = TestClient(api_server.app)
+    api = BankApiClient(base_url="http://testserver", session=test_client, api_key=api_server.BANK_API_KEY)
+    svc = ChatbotService(api_client=api, db_manager=db)
+    api_server.chatbot = svc
 
     # -------------------------------------------------------------
     # Pre-Check: Entity Counts
     # -------------------------------------------------------------
     print("\n[PRE-CHECK] Verifying Entity Counts in Database (>= 5 rows required)...")
     customers = db.get_all_customers()
+    cust_by_name = {c.name: c for c in customers}
     appointments = db.get_all_appointments()
     leads = db.get_all_leads()
     with db.get_connection() as conn:
@@ -100,8 +107,8 @@ def run_all_tests():
     print("  --> Step 2 PASS: Bot asked for ID number without leaking details.")
 
     # Step 3: User enters matching ID
-    r3 = svc.process_message(s1, "123456789")
-    print(f"User: 123456789")
+    r3 = svc.process_message(s1, "123456782")
+    print(f"User: 123456782")
     print(f"Bot:  {r3['reply']}")
     assert r3["session"]["state"] == ConversationState.VERIFIED
     assert "19.01.2027" in r3["reply"], f"Expected actual date 19.01.2027 in reply: {r3['reply']}"
@@ -136,8 +143,8 @@ def run_all_tests():
     print("  --> Step 2 PASS: Candidate identified, prompted for ID number.")
 
     # Step 3: User provides matching ID
-    r3 = svc.process_message(s2, "987654321")
-    print(f"User: 987654321")
+    r3 = svc.process_message(s2, "987654324")
+    print(f"User: 987654324")
     print(f"Bot:  {r3['reply']}")
     assert r3["session"]["state"] == ConversationState.VERIFIED
     assert "closest appointment" in r3["reply"].lower()
@@ -180,12 +187,13 @@ def run_all_tests():
     print("  --> Attempt 3 PASS: Session blocked after 3 failed attempts.")
 
     # Attempt 4: Blocked persistence check
-    r_bad4 = svc.process_message(s3, "123456789") # Even if correct now, must remain blocked
-    print(f"User (After lock): 123456789")
+    r_bad4 = svc.process_message(s3, "123456782") # Even if correct now, must remain blocked
+    print(f"User (After lock): 123456782")
     print(f"Bot:  {r_bad4['reply']}")
     assert r_bad4["session"]["state"] == ConversationState.BLOCKED
     assert "locked" in r_bad4["reply"].lower() or "blocked" in r_bad4["reply"].lower()
     print("  --> Persistence PASS: Session remains blocked.")
+    db.clear_customer_lockout(cust_by_name["Dana Shavit"].id)
 
     # -------------------------------------------------------------
     # Scenario 4: Existing Customer with No Open Appointments
@@ -202,8 +210,8 @@ def run_all_tests():
     print(f"User: Yes")
     print(f"Bot:  {r2['reply']}")
 
-    r3 = svc.process_message(s4, "222333444")
-    print(f"User: 222333444")
+    r3 = svc.process_message(s4, "222333445")
+    print(f"User: 222333445")
     print(f"Bot:  {r3['reply']}")
     assert r3["session"]["state"] == ConversationState.VERIFIED
     assert "no open or scheduled appointments" in r3["reply"].lower() or "no" in r3["reply"].lower()
@@ -268,9 +276,10 @@ def run_all_tests():
     rot_s4 = "attacker_session_4"
     svc.process_message(rot_s4, "My name is Tamar Ben-David")
     svc.process_message(rot_s4, "Yes")
-    r_rot4 = svc.process_message(rot_s4, "444333222") # Even correct ID is blocked
+    r_rot4 = svc.process_message(rot_s4, "444333223") # Even correct ID is blocked
     assert "locked" in r_rot4["reply"].lower() or "blocked" in r_rot4["reply"].lower()
     print("  --> 6.3 PASS: Account lockout persists across rotated session IDs.")
+    db.clear_customer_lockout(cust_by_name["Tamar Ben-David"].id)
 
     # 6.4: Appointment Existence & Status Integrity
     assert db.get_appointment_by_id(99999) is None, "Non-existent appointment ID returned data!"
@@ -325,7 +334,7 @@ def run_all_tests():
     # Step 5: ID Number validation (9 digits)
     r_bad_id = svc.process_message(s7, "12345")
     assert "9 digits" in r_bad_id["reply"]
-    r_good_id = svc.process_message(s7, "333444555")
+    r_good_id = svc.process_message(s7, "333444552")
     assert "Phone" in r_good_id["reply"]
     print("  --> Step 5 PASS: Validated national ID (exactly 9 digits), prompted for Phone.")
 
@@ -356,7 +365,7 @@ def run_all_tests():
     assert new_user is not None
     assert new_user.name == "Ronit Bar"
     assert new_user.phone == "0521234567"
-    assert new_user.id_number == "333444555"
+    assert new_user.id_number == "333444552"
     # -------------------------------------------------------------
     # Scenario 8: Code Review Remediations & Zero-Leak API Hardening
     # -------------------------------------------------------------
@@ -438,11 +447,7 @@ def run_all_tests():
     print("  --> 8.4 PASS: Fail-closed ownership validation on cancel & reschedule verified.")
 
     # 8.5: REST API Authentication & PII Protection via FastAPI TestClient
-    from fastapi.testclient import TestClient
-    import api_server
-    api_server.db = db
-    api_server.chatbot = svc
-    client = TestClient(api_server.app)
+    client = test_client
 
     # Unauthenticated curl to /api/customers -> 401 Unauthorized
     resp_unauth = client.get("/api/customers")
@@ -505,6 +510,242 @@ def run_all_tests():
     r_locked = svc.process_message(s_lock, "000000003")
     assert "start a new session" not in r_locked["reply"].lower(), "Bypass invitation found in lockout message!"
     print("  --> 8.6 PASS: Lockout message sanitization verified.")
+    db.clear_customer_lockout(cust_by_name["Tamar Ben-David"].id)
+
+    # -------------------------------------------------------------
+    # Scenario 9: Comprehensive Security, Architecture & NLU Hardening
+    # -------------------------------------------------------------
+    print_separator("TEST SCENARIO 9: Comprehensive Security, Architecture & NLU Hardening")
+
+    # 9.1: Hardcoded API Key Decommissioned & Rejection
+    resp_hardcoded = client.get("/api/customers", headers={"X-API-Key": "haovdim_bank_internal_secret_key_2026"})
+    assert resp_hardcoded.status_code == 401, f"Expected 401 for deprecated hardcoded key, got {resp_hardcoded.status_code}"
+    resp_valid_key = client.get("/api/customers", headers={"X-API-Key": api_server.BANK_API_KEY})
+    assert resp_valid_key.status_code == 200, f"Expected 200 for valid API key, got {resp_valid_key.status_code}"
+    print("  --> 9.1 PASS: Static API key rejected; dynamic/env key required.")
+
+    # 9.2: IDOR Immunity via Cryptographic Signed JWT Tokens
+    c1 = db.get_customer_by_auth("dana.shavit@bank.com", "password123")
+    login_resp1 = client.post("/api/auth/login", json={"email": "dana.shavit@bank.com", "password": "password123"})
+    assert login_resp1.status_code == 200, f"Dana login failed: {login_resp1.text}"
+    c1_token = login_resp1.json()["access_token"]
+
+    c2 = db.get_customer_by_auth("david.cohen@bank.com", "password123")
+    login_resp2 = client.post("/api/auth/login", json={"email": "david.cohen@bank.com", "password": "password123"})
+    assert login_resp2.status_code == 200, f"David login failed: {login_resp2.text}"
+    c2_token = login_resp2.json()["access_token"]
+
+    dana_new_app = db.create_appointment(c1.id, "Wealth Management", "2027-08-10", "11:00")
+    assert dana_new_app is not None
+
+    # IDOR Attack 1: David attempts to cancel Dana's appointment using customer_id=c1.id
+    resp_idor1 = client.patch(
+        f"/api/appointments/{dana_new_app.id}/cancel?customer_id={c1.id}",
+        headers={"Authorization": f"Bearer {c2_token}"}
+    )
+    assert resp_idor1.status_code == 403, f"Expected 403 Forbidden for IDOR attempt, got {resp_idor1.status_code}"
+
+    # IDOR Attack 2: David attempts to cancel Dana's appointment using his own customer_id=c2.id
+    resp_idor2 = client.patch(
+        f"/api/appointments/{dana_new_app.id}/cancel?customer_id={c2.id}",
+        headers={"Authorization": f"Bearer {c2_token}"}
+    )
+    assert resp_idor2.status_code == 403, f"Expected 403 Forbidden for mismatched appointment owner, got {resp_idor2.status_code}"
+
+    # IDOR Attack 3: David attempts to reschedule Dana's appointment
+    resp_idor3 = client.patch(
+        f"/api/appointments/{dana_new_app.id}/reschedule?customer_id={c1.id}",
+        json={"new_date": "2027-08-11", "new_time": "12:00"},
+        headers={"Authorization": f"Bearer {c2_token}"}
+    )
+    assert resp_idor3.status_code == 403, f"Expected 403 Forbidden for IDOR reschedule attempt, got {resp_idor3.status_code}"
+
+    # Legitimate: Dana cancels her own appointment
+    resp_legit = client.patch(
+        f"/api/appointments/{dana_new_app.id}/cancel?customer_id={c1.id}",
+        headers={"Authorization": f"Bearer {c1_token}"}
+    )
+    assert resp_legit.status_code == 200, f"Expected 200 OK for legitimate owner cancellation, got {resp_legit.status_code}"
+
+    # Tampered JWT Token
+    resp_tampered = client.patch(
+        f"/api/appointments/{dana_new_app.id}/cancel?customer_id={c1.id}",
+        headers={"Authorization": f"Bearer {c1_token}modified"}
+    )
+    assert resp_tampered.status_code == 401, f"Expected 401 for tampered JWT signature, got {resp_tampered.status_code}"
+    print("  --> 9.2 PASS: IDOR strictly blocked via verified JWT identity & token integrity.")
+
+    # 9.3: Password Hashing Consistency (Bcrypt with Salt across System & Admin UI)
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, password FROM Customers")
+        pw_rows = cursor.fetchall()
+    for name, pw in pw_rows:
+        assert pw.startswith("$2b$") or pw.startswith("$2a$"), (
+            f"Customer {name} password hash not using bcrypt: {pw}"
+        )
+    print("  --> 9.3 PASS: All customer passwords strictly salted & hashed with bcrypt.")
+
+    # 9.4: PII Data Leakage Prevention on /api/customers/{customer_id}
+    resp_c2_view_c1 = client.get(f"/api/customers/{c1.id}", headers={"Authorization": f"Bearer {c2_token}"})
+    assert resp_c2_view_c1.status_code == 200
+    c1_data_as_c2 = resp_c2_view_c1.json()
+    assert c1_data_as_c2["dob"] is None, "SECURITY LEAK: Other customer's DOB exposed!"
+    assert c1_data_as_c2["address"] is None, "SECURITY LEAK: Other customer's address exposed!"
+
+    resp_c1_view_self = client.get(f"/api/customers/{c1.id}", headers={"Authorization": f"Bearer {c1_token}"})
+    assert resp_c1_view_self.status_code == 200
+    c1_data_self = resp_c1_view_self.json()
+    assert c1_data_self["dob"] == "1995-05-12", f"Owner cannot view their own DOB: {c1_data_self}"
+    assert c1_data_self["address"] == "Tel Aviv", f"Owner cannot view their own address: {c1_data_self}"
+
+    resp_staff_view = client.get(f"/api/customers/{c1.id}", headers={"X-API-Key": api_server.BANK_API_KEY})
+    assert resp_staff_view.status_code == 200
+    c1_data_staff = resp_staff_view.json()
+    assert c1_data_staff["dob"] == "1995-05-12"
+    assert c1_data_staff["address"] == "Tel Aviv"
+    print("  --> 9.4 PASS: PII (DOB, address) protected from sequential harvesting.")
+
+    # 9.5: Multi-Worker / Multi-Process Concurrency & SQLite Session Persistence
+    worker_a = ChatbotService(api_client=api, db_manager=db)
+    worker_b = ChatbotService(api_client=api, db_manager=db)
+    sess_concur = "concurrency_test_session"
+
+    r_w_a1 = worker_a.process_message(sess_concur, "My name is Dana Shavit")
+    assert "Dana Shavit" in r_w_a1["reply"]
+    assert r_w_a1["session"]["state"] == ConversationState.AWAITING_NAME_CONFIRMATION
+
+    # Worker B processes confirmation (reads from SQLite):
+    r_w_b2 = worker_b.process_message(sess_concur, "Yes")
+    assert "ID number" in r_w_b2["reply"]
+    assert r_w_b2["session"]["state"] == ConversationState.AWAITING_ID_VERIFICATION
+
+    # Worker A processes ID entry (reads from SQLite):
+    r_w_a3 = worker_a.process_message(sess_concur, "123456782")
+    assert r_w_a3["session"]["state"] == ConversationState.VERIFIED
+    # Direct DB inspection confirms persistent session state
+    saved_sess = db.get_chat_session(sess_concur)
+    assert saved_sess is not None
+    assert saved_sess["state"] == "VERIFIED"
+    assert saved_sess["verified"] is True
+    print("  --> 9.5 PASS: Chat session state reliably persisted across multi-worker instances.")
+
+    # 9.6: Brute-Force Lockout Persistence across Session Drops in DB
+    c3 = cust_by_name["David Levi"]
+    assert c3 is not None
+    db.clear_customer_lockout(c3.id)
+
+    # Session Alpha: 2 failed attempts
+    s_alpha = "attack_sess_alpha"
+    worker_a.process_message(s_alpha, "My name is David Levi")
+    worker_a.process_message(s_alpha, "Yes")
+    worker_a.process_message(s_alpha, "000000001")
+    worker_a.process_message(s_alpha, "000000002")
+
+    # Attacker drops connection and creates Session Beta
+    s_beta = "attack_sess_beta"
+    worker_b.process_message(s_beta, "My name is David Levi")
+    worker_b.process_message(s_beta, "Yes")
+    r_beta_fail = worker_b.process_message(s_beta, "000000003")
+    assert "locked" in r_beta_fail["reply"].lower() or "exceeded" in r_beta_fail["reply"].lower()
+
+    # Session Gamma: Brand new session immediately blocked
+    s_gamma = "attack_sess_gamma"
+    r_gamma = worker_a.process_message(s_gamma, "My name is David Levi")
+    assert "locked" in r_gamma["reply"].lower() or "exceeded" in r_gamma["reply"].lower()
+    print("  --> 9.6 PASS: Brute-force lockout tracked in database and persists across dropped sessions.")
+
+    # 9.7: Israeli ID Luhn Modulo 10 Algorithm Rigorous Verification
+    assert auth_utils.validate_israeli_id("123456782") is True
+    assert auth_utils.validate_israeli_id("987654324") is True
+    assert auth_utils.validate_israeli_id("555666775") is True
+    assert auth_utils.validate_israeli_id("444333223") is True
+    assert auth_utils.validate_israeli_id("222333445") is True
+    assert auth_utils.validate_israeli_id("333444552") is True
+    # Leading zero (8 digits padded to 9 digits)
+    assert auth_utils.validate_israeli_id("012345674") is True
+    assert auth_utils.validate_israeli_id("12345674") is True
+
+    # Check invalid IDs
+    assert auth_utils.validate_israeli_id("123456789") is False # Invalid check digit
+    assert auth_utils.validate_israeli_id("000000000") is False # All zeros
+    assert auth_utils.validate_israeli_id("111111111") is False # Invalid checksum
+    assert auth_utils.validate_israeli_id("12345") is False     # Too short
+    assert auth_utils.validate_israeli_id("1234567890") is False # Too long
+    assert auth_utils.validate_israeli_id("abcdefghi") is False # Non-digits
+    print("  --> 9.7 PASS: Israeli ID Luhn Modulo 10 check digit verification fully operational.")
+
+    # 9.8: Pure HTTP BankApiClient (Zero Database Fallback Bypass)
+    import api_client
+    assert not hasattr(api_client, "DatabaseManager"), "Direct DatabaseManager import found in api_client!"
+
+    broken_client = BankApiClient(base_url="http://127.0.0.1:59999", api_key="test_key")
+    try:
+        broken_client.search_customers("Dana")
+        assert False, "Expected ConnectionError when API server is unreachable"
+    except ConnectionError as e:
+        assert "Direct database fallback is strictly disabled" in str(e)
+    print("  --> 9.8 PASS: BankApiClient is a pure HTTP client with fail-closed security and no direct DB fallback.")
+
+    # 9.9: Calendar Scheduling Race Condition & Atomic Unique Slot Enforcement
+    import sqlite3
+    app_slot1 = db.create_appointment(c1.id, "Consultation", "2027-09-01", "09:30")
+    assert app_slot1 is not None
+
+    try:
+        db.create_appointment(c2.id, "Mortgage", "2027-09-01", "09:30")
+        assert False, "Expected booking conflict on duplicate slot!"
+    except (sqlite3.IntegrityError, ValueError):
+        pass
+
+    app_slot2 = db.create_appointment(c2.id, "Mortgage", "2027-09-02", "10:00")
+    try:
+        resched_result = db.reschedule_appointment(app_slot2.id, "2027-09-01", "09:30")
+        assert resched_result is False, "Expected reschedule to duplicate slot to fail!"
+    except (sqlite3.IntegrityError, ValueError):
+        pass
+
+    assert db.update_appointment_status(app_slot1.id, "Cancelled") is True
+    app_slot3 = db.create_appointment(c2.id, "Mortgage", "2027-09-01", "09:30")
+    assert app_slot3 is not None
+    print("  --> 9.9 PASS: Calendar scheduling atomic transactions & UNIQUE constraint prevent double bookings.")
+
+    # 9.10: Offline Hebrew Support & Robust Entity Extraction
+    import nlu
+    nlu_engine = nlu.NLULayer()
+    # 1. Hebrew intent and claimed date extraction
+    ext_hebrew = nlu_engine._extract_with_fallback("שלום קוראים לי דוד כהן ויש לי תור בתאריך 15.02.2027")
+    assert ext_hebrew.get("name") == "דוד כהן", f"Failed Hebrew name extraction, got: {ext_hebrew.get('name')}"
+    assert ext_hebrew.get("claimed_date") == "2027-02-15", f"Failed Hebrew date extraction, got: {ext_hebrew.get('claimed_date')}"
+
+    # 2. Hebrew intent recognition
+    ext_intent_cancel = nlu_engine._extract_with_fallback("אני רוצה לבטל את הפגישה שלי")
+    assert "cancel" in (ext_intent_cancel.get("intent") or ""), f"Unexpected intent: {ext_intent_cancel.get('intent')}"
+
+    ext_intent_resched = nlu_engine._extract_with_fallback("אשמח לשנות את מועד התור")
+    assert "reschedule" in (ext_intent_resched.get("intent") or ""), f"Unexpected intent: {ext_intent_resched.get('intent')}"
+
+    # 3. Hebrew confirmations and denials
+    ext_confirm = nlu_engine._extract_with_fallback("כן, זה נכון מאוד")
+    assert ext_confirm.get("confirmation") is True
+
+    ext_deny = nlu_engine._extract_with_fallback("לא, זה לא התור שלי")
+    assert ext_deny.get("confirmation") is False
+
+    # 4. Complex names: hyphenated, honorific titles (Dr., ד"ר)
+    ext_name_hyphen = nlu_engine._extract_with_fallback("My name is Tamar Ben-David")
+    assert "Tamar Ben-David" in (ext_name_hyphen.get("name") or "")
+
+    ext_name_dr_en = nlu_engine._extract_with_fallback("Hello, I am Dr. Sarah Connor")
+    assert "Sarah Connor" in (ext_name_dr_en.get("name") or "")
+
+    ext_name_dr_he = nlu_engine._extract_with_fallback("שלום, שמי ד\"ר אברהם לוי")
+    assert "אברהם לוי" in (ext_name_dr_he.get("name") or "")
+
+    # 5. Hyphenated Israeli ID extraction
+    ext_id_hyphen = nlu_engine._extract_with_fallback("התעודת זהות שלי היא 123-456-782")
+    assert ext_id_hyphen.get("id_number") == "123456782", f"Failed hyphenated ID extraction, got: {ext_id_hyphen.get('id_number')}"
+    print("  --> 9.10 PASS: Offline Hebrew NLU, intent recognition, complex names and hyphenated IDs verified.")
 
     print_separator("ALL TEST SCENARIOS (MANDATORY + SECURITY + REGISTRATION + REMEDIATIONS) PASSED!")
 

@@ -341,7 +341,7 @@
         </div>
       </div>
       <div class="chat-input-area">
-        <input id="user-input" type="text" placeholder="Type your message here..." autocomplete="off" />
+        <input id="user-input" type="text" dir="auto" placeholder="Type your message here..." autocomplete="off" />
         <button class="btn-send" onclick="sendMessage()">Send</button>
       </div>
     </div>
@@ -589,6 +589,10 @@
       msgDiv.className = `message ${role}`;
       const bubbleDiv = document.createElement("div");
       bubbleDiv.className = "bubble";
+      if (/[\u0590-\u05FF]/.test(text)) {
+        bubbleDiv.setAttribute("dir", "rtl");
+        bubbleDiv.style.textAlign = "right";
+      }
       let cleanText = text.replace(/\*\*/g, "").replace(/\*/g, "").replace(/\n/g, "<br>");
       bubbleDiv.innerHTML = cleanText;
       msgDiv.appendChild(bubbleDiv);
