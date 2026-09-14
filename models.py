@@ -9,6 +9,7 @@ class Customer:
     email: str
     dob: str
     address: str
+    id_number: Optional[str] = None
 
 @dataclass
 class Appointment:
